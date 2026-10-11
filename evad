@@ -1,0 +1,3571 @@
+local players = game:GetService("Players")
+local userInputService = game:GetService("UserInputService")
+local runService = game:GetService("RunService")
+local debris = game:GetService("Debris")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local lighting = game:GetService("Lighting")
+local virtualUser = game:GetService("VirtualUser")
+
+if getgenv().SolanaHubEvade then
+    warn("[Solana Hub] Script sudah berjalan. Tekan Unload di tab Misc kalau mau memuat ulang.")
+    return
+end
+
+local localPlayer = players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+-- ============================================================================
+-- SOLANA HUB UI BRIDGE
+-- Memakai ModernV2 (UI yang sama dengan Solana Hub - Ride A Pet / Steal An Egg)
+-- dan menyediakan API ringkas: ui:Section(nama) -> AddToggle / AddSlider / dst.
+-- ============================================================================
+local uiLibrary = (function()
+    local THEME = {
+        Color = Color3.fromRGB(220, 35, 55),
+        Title = "Solana Hub",
+        Content = "Evade | V 1.0",
+        Logo = "rbxassetid://135199868370962",
+        Discord = "https://discord.gg/solanahub",
+    }
+
+    local MODERN_URLS = {
+        "https://raw.githubusercontent.com/SolanaHubmy/ggsolana/refs/heads/main/SolanaHub-ModernV2.txt",
+    }
+
+    -- Patch kecil untuk ModernV2: tinggi panel AddParagraph diukur dari teks tanpa tag rich text.
+    local function patchLibrarySource(source)
+        if type(source) ~= "string" then
+            return source
+        end
+
+        local needle = "local ContentSize = TextService:GetTextSize(ContentLabel.Text,ContentLabel.TextSize,ContentLabel.Font,Vector2.new(Width,math.huge));"
+
+        local replacement = [[local PlainText = ContentLabel.Text
+			if ContentLabel.RichText then
+				PlainText = PlainText:gsub("<[^>]*>", ""):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&")
+			end
+			local ContentSize = TextService:GetTextSize(PlainText,ContentLabel.TextSize,ContentLabel.Font,Vector2.new(math.max(60, Width - 12),math.huge));]]
+
+        local startIndex, endIndex = string.find(source, needle, 1, true)
+
+        if not startIndex then
+            return source
+        end
+
+        return string.sub(source, 1, startIndex - 1) .. replacement .. string.sub(source, endIndex + 1)
+    end
+
+    local modern
+
+    for attempt = 1, 3 do
+        for _, url in ipairs(MODERN_URLS) do
+            local didLoad, lib = pcall(function()
+                local source = patchLibrarySource(game:HttpGet(url))
+                local chunk, compileError = loadstring(source)
+
+                if not chunk then
+                    error(compileError)
+                end
+
+                return chunk()
+            end)
+
+            if didLoad and type(lib) == "table" then
+                modern = lib
+                break
+            end
+
+            warn("[Solana Hub] Gagal memuat ModernV2 dari " .. url .. ": " .. tostring(lib))
+        end
+
+        if modern then
+            break
+        end
+
+        task.wait(1)
+    end
+
+    if not modern then
+        error("ModernV2 gagal dimuat (network issue). Rejoin lalu jalankan script lagi.")
+    end
+
+    pcall(function() modern.GlobalLogo = THEME.Logo end)
+
+    local TAB_ORDER = { "Player", "Utility", "Map", "Visual", "Emote", "Misc" }
+
+    local TAB_ICONS = {
+        Player = "lucide:user",
+        Utility = "lucide:wrench",
+        Map = "lucide:map",
+        Visual = "lucide:eye",
+        Emote = "lucide:smile",
+        Misc = "lucide:settings",
+    }
+
+    local LAYOUT = {
+        Player = {
+            {
+                Group = "Jumping",
+                Subs = {
+                    { Name = "Front", Icon = "lucide:arrow-up-right", Sections = { "Front Jump" } },
+                    { Name = "Height", Icon = "lucide:chevrons-up", Sections = { "Jump Height" } },
+                    { Name = "Bhop", Icon = "lucide:rabbit", Sections = { "Bhop" } },
+                },
+            },
+            {
+                Group = "Air Control",
+                Subs = {
+                    { Name = "Layer", Icon = "lucide:layers", Sections = { "Layer Jumps" } },
+                    { Name = "Impulse", Icon = "lucide:zap", Sections = { "Impulse Jump" } },
+                    { Name = "Trimp", Icon = "lucide:wind", Sections = { "Auto Trimp" } },
+                },
+            },
+            {
+                Group = "Ground Speed",
+                Subs = {
+                    { Name = "Walk", Icon = "lucide:footprints", Sections = { "Teleport Walk" } },
+                    { Name = "Slide", Icon = "lucide:move-down-right", Sections = { "Infinite Slide" } },
+                    { Name = "Stats", Icon = "lucide:gauge", Sections = { "Movement Stats", "Gravity Mod" } },
+                },
+            },
+        },
+        Utility = {
+            {
+                Group = "Utilities",
+                Subs = {
+                    { Name = "Move", Icon = "lucide:ghost", Sections = { "Movement" } },
+                    { Name = "Escape", Icon = "lucide:shield", Sections = { "Auto Escape" } },
+                    { Name = "Lag", Icon = "lucide:wifi-off", Sections = { "Lag Switch" } },
+                },
+            },
+            {
+                Group = "Graphics",
+                Subs = {
+                    { Name = "Graphics", Icon = "lucide:sun", Sections = { "Graphics" } },
+                },
+            },
+        },
+        Map = {
+            {
+                Group = "Map",
+                Subs = {
+                    { Name = "Map", Icon = "lucide:map-pin", Sections = { "Map Features" } },
+                    { Name = "Team", Icon = "lucide:heart-handshake", Sections = { "Team Support" } },
+                },
+            },
+        },
+        Visual = {
+            {
+                Group = "ESP",
+                Subs = {
+                    { Name = "Player", Icon = "lucide:scan-eye", Sections = { "Player ESP" } },
+                    { Name = "External", Icon = "lucide:eye", Sections = { "External ESP" } },
+                },
+            },
+        },
+        Emote = {
+            {
+                Group = "Emotes",
+                Subs = {
+                    { Name = "Play", Icon = "lucide:smile", Sections = { "Emote Play" } },
+                    { Name = "Visual", Icon = "lucide:sparkles", Sections = { "Emote Visual" } },
+                    { Name = "Speed", Icon = "lucide:fast-forward", Sections = { "Emote Speed" } },
+                },
+            },
+        },
+        Misc = {
+            {
+                Group = "Settings",
+                Subs = {
+                    { Name = "Interface", Icon = "lucide:layout-dashboard", Sections = { "Interface" } },
+                    { Name = "Keys", Icon = "lucide:keyboard", Sections = { "Keybinds" } },
+                },
+            },
+        },
+    }
+
+    local bridge = { _window = nil }
+    local flagCounts = {}
+
+    local function stripTags(text)
+        return (tostring(text or ""):gsub("<[^>]+>", ""))
+    end
+
+    local function makeFlag(prefix, scope, title)
+        local base = prefix .. ":" .. scope .. "/" .. title
+        flagCounts[base] = (flagCounts[base] or 0) + 1
+
+        if flagCounts[base] > 1 then
+            base = base .. "#" .. flagCounts[base]
+        end
+
+        return base
+    end
+
+    local function applyValue(instance, value)
+        if type(instance) ~= "table" then
+            return false
+        end
+
+        for _, method in ipairs({ "SetValue", "Set", "Select" }) do
+            local fn = instance[method]
+
+            if type(fn) == "function" then
+                if pcall(fn, instance, value) then
+                    return true
+                end
+            end
+        end
+
+        return false
+    end
+
+    local function applyText(instance, title, text)
+        if type(instance) ~= "table" then
+            return
+        end
+
+        for _, method in ipairs({ "SetContent", "SetDescription", "SetText", "Set", "Update", "SetValue" }) do
+            local fn = instance[method]
+
+            if type(fn) == "function" then
+                local ok
+
+                if method == "Set" or method == "Update" then
+                    ok = pcall(fn, instance, { Name = title, Title = title, Content = text, Description = text, Text = text })
+                else
+                    ok = pcall(fn, instance, text)
+                end
+
+                if ok then
+                    return
+                end
+            end
+        end
+    end
+
+    local function wrapHost(host, sectionName, withHeader)
+        local section = {}
+        local pendingHeader = withHeader and sectionName or nil
+
+        local function header()
+            if pendingHeader then
+                local text = pendingHeader
+                pendingHeader = nil
+                pcall(function() host:AddDivider({ Text = text }) end)
+            end
+        end
+
+        local function attachTip(instance, title, desc)
+            desc = desc and tostring(desc) or ""
+
+            if desc == "" or type(instance) ~= "table" then
+                return
+            end
+
+            local root = instance.Root
+
+            if typeof(root) ~= "Instance" then
+                return
+            end
+
+            pcall(function()
+                instance.Tip = modern:CreateToolTips(root, title, desc)
+            end)
+        end
+
+        function section:AddParagraph(cfg)
+            header()
+
+            local title = stripTags(cfg.Title)
+            local content = tostring(cfg.Content or cfg.Description or "")
+            local handle = { Text = content }
+
+            local didAdd, instance = pcall(function()
+                return host:AddParagraph({
+                    Name = title,
+                    Title = title,
+                    Content = content,
+                    Description = content,
+                    Text = content,
+                })
+            end)
+
+            handle.Instance = didAdd and instance or nil
+
+            function handle:SetDescription(text)
+                text = tostring(text or "")
+
+                if text == handle.Text then
+                    return
+                end
+
+                handle.Text = text
+                applyText(handle.Instance, title, text)
+            end
+
+            return handle
+        end
+
+        function section:AddToggle(cfg)
+            header()
+
+            local title = stripTags(cfg.Title)
+            local default = cfg.Default == true
+            local handle = { Value = default }
+            local isReady = false
+
+            local didAdd, instance = pcall(function()
+                local options = {
+                    Name = title,
+                    Default = default,
+                    Flag = makeFlag("T", sectionName, title),
+                    Callback = function(value)
+                        handle.Value = value == true
+
+                        if not isReady then
+                            return
+                        end
+
+                        if type(cfg.Callback) == "function" then
+                            task.spawn(pcall, cfg.Callback, handle.Value)
+                        end
+                    end,
+                }
+
+                if cfg.Description then
+                    options.Tooltip = cfg.Description
+                end
+
+                return host:AddToggle(options)
+            end)
+
+            handle.Instance = didAdd and instance or nil
+            attachTip(handle.Instance, title, cfg.Description)
+
+            task.delay(0.4, function() isReady = true end)
+
+            function handle:Set(value)
+                handle.Value = value == true
+                applyValue(handle.Instance, handle.Value)
+            end
+
+            function handle:Get()
+                return handle.Value
+            end
+
+            return handle
+        end
+
+        function section:AddButton(cfg)
+            header()
+
+            local title = stripTags(cfg.Title)
+            local handle = {}
+
+            local didAdd, instance = pcall(function()
+                return host:AddButton({
+                    Name = title,
+                    ToolTip = cfg.Description,
+                    Tooltip = cfg.Description,
+                    Callback = function()
+                        if type(cfg.Callback) == "function" then
+                            task.spawn(pcall, cfg.Callback)
+                        end
+                    end,
+                })
+            end)
+
+            handle.Instance = didAdd and instance or nil
+
+            return handle
+        end
+
+        function section:AddDropdown(cfg)
+            header()
+
+            local title = stripTags(cfg.Title)
+            local values = {}
+
+            for _, option in ipairs(cfg.Options or cfg.Values or {}) do
+                values[#values + 1] = tostring(option)
+            end
+
+            local default = cfg.Default
+
+            if type(default) == "table" then
+                default = default[1]
+            end
+
+            local handle = { Value = default }
+
+            local didAdd, instance = pcall(function()
+                return host:AddDropdown({
+                    Name = title,
+                    Values = values,
+                    Default = default,
+                    Multi = false,
+                    Search = #values > 8,
+                    AllowNone = false,
+                    Tooltip = cfg.Description,
+                    Flag = makeFlag("D", sectionName, title),
+                    Callback = function(value)
+                        if type(value) == "table" then
+                            value = value[1]
+                        end
+
+                        handle.Value = value
+
+                        if type(cfg.Callback) == "function" then
+                            task.spawn(pcall, cfg.Callback, value)
+                        end
+                    end,
+                })
+            end)
+
+            handle.Instance = didAdd and instance or nil
+            attachTip(handle.Instance, title, cfg.Description)
+
+            function handle:Get()
+                return handle.Value
+            end
+
+            return handle
+        end
+
+        function section:AddSlider(cfg)
+            header()
+
+            local title = stripTags(cfg.Title)
+            local increment = tonumber(cfg.Increment) or 1
+            local rounding = 0
+
+            if increment < 1 then
+                rounding = increment <= 0.01 and 2 or 1
+            end
+
+            local unit = ""
+
+            if cfg.Unit == "%" then
+                unit = "%"
+            elseif cfg.Unit then
+                unit = " " .. tostring(cfg.Unit)
+            end
+
+            local handle = { Value = cfg.Default or cfg.Min or 0 }
+
+            local didAdd, instance = pcall(function()
+                return host:AddSlider({
+                    Name = title,
+                    Min = cfg.Min or 0,
+                    Max = cfg.Max or 100,
+                    Default = handle.Value,
+                    Increment = increment,
+                    Rounding = rounding,
+                    Type = unit,
+                    Flag = makeFlag("S", sectionName, title),
+                    Callback = function(value)
+                        handle.Value = value
+
+                        if type(cfg.Callback) == "function" then
+                            task.spawn(pcall, cfg.Callback, value)
+                        end
+                    end,
+                })
+            end)
+
+            handle.Instance = didAdd and instance or nil
+            attachTip(handle.Instance, title, cfg.Description)
+
+            function handle:Get()
+                return handle.Value
+            end
+
+            return handle
+        end
+
+        function section:AddInput(cfg)
+            header()
+
+            local title = stripTags(cfg.Title)
+            local handle = { Value = cfg.Default or "" }
+
+            local didAdd, instance = pcall(function()
+                return host:AddTextInput({
+                    Name = title,
+                    Placeholder = cfg.Placeholder or "",
+                    Default = cfg.Default or "",
+                    Tooltip = cfg.Description,
+                    Flag = makeFlag("I", sectionName, title),
+                    Callback = function(text)
+                        handle.Value = text
+
+                        if type(cfg.Callback) == "function" then
+                            task.spawn(pcall, cfg.Callback, text)
+                        end
+                    end,
+                })
+            end)
+
+            handle.Instance = didAdd and instance or nil
+            attachTip(handle.Instance, title, cfg.Description)
+
+            function handle:Get()
+                return handle.Value
+            end
+
+            return handle
+        end
+
+        return section
+    end
+
+    local function buildTab(window, tabName)
+        local didAdd, tab = pcall(function()
+            return window:AddTab({ Name = tabName, Icon = TAB_ICONS[tabName] or "lucide:layers", Type = "Single" })
+        end)
+
+        assert(didAdd and tab, "Gagal membuat tab: " .. tostring(tabName))
+
+        local homes = {}
+
+        for _, group in ipairs(LAYOUT[tabName] or {}) do
+            local didBox, tabbox = pcall(function() return tab:AddCenterTabbox(group.Group) end)
+
+            if didBox and tabbox then
+                for _, sub in ipairs(group.Subs) do
+                    local didSub, subTab = pcall(function()
+                        return tabbox:AddTab({ Name = sub.Name, Icon = sub.Icon })
+                    end)
+
+                    if didSub and subTab then
+                        for _, sectionName in ipairs(sub.Sections) do
+                            homes[sectionName] = subTab
+                        end
+                    else
+                        warn("[Solana Hub] Gagal membuat sub-tab " .. sub.Name .. ": " .. tostring(subTab))
+                    end
+                end
+            else
+                warn("[Solana Hub] Gagal membuat tabbox " .. group.Group .. ": " .. tostring(tabbox))
+            end
+        end
+
+        return { Raw = tab, Homes = homes }
+    end
+
+    function bridge:CreateWindow()
+        local menuIcon
+
+        if type(modern.CreateMenuIcon) == "function" then
+            local didIcon, icon = pcall(function()
+                return modern:CreateMenuIcon({
+                    Image = THEME.Logo,
+                    Size = 48,
+                    IconColor = Color3.fromRGB(255, 255, 255),
+                    BGColor = Color3.fromRGB(20, 22, 27),
+                    StrokeColor = THEME.Color,
+                    StrokeThick = 1.5,
+                    Draggable = true,
+                })
+            end)
+
+            if didIcon then
+                menuIcon = icon
+            else
+                warn("[Solana Hub] Gagal membuat menu icon: " .. tostring(icon))
+            end
+        end
+
+        local creator = modern.Window or modern.CreateWindow
+        assert(type(creator) == "function", "ModernV2 tidak punya Window/CreateWindow.")
+
+        local window = creator(modern, {
+            Title = THEME.Title,
+            Content = THEME.Content,
+            Logo = THEME.Logo,
+            Image = THEME.Logo,
+            Uitransparent = 0.15,
+            Size = UDim2.fromOffset(500, 320),
+            Color = THEME.Color,
+            ShowUser = true,
+            Search = true,
+            ConfigEnabled = true,
+            NotifyOnCallbackError = false,
+            Loadingscreen = false,
+            Enable3DRenderer = false,
+            Keybind = "RightControl",
+            Config = {
+                ConfigFolder = "SolanaHubEvade",
+                AutoSaveFile = "SolanaHub_Evade",
+                AutoSave = false,
+                AutoLoad = false,
+                Overwrite = true,
+                Format = "JSON",
+                ShowAutoSaveToggle = true,
+                TextGradient = true,
+            },
+        })
+
+        assert(window, "ModernV2 gagal membuat window.")
+
+        pcall(function()
+            if window.Root then
+                for _, descendant in ipairs(window.Root:GetDescendants()) do
+                    if descendant:IsA("ImageLabel") and (
+                        string.find(tostring(descendant.Image), "logo.png")
+                        or string.find(tostring(descendant.Image), "120358385035996")
+                        or string.find(tostring(descendant.Image), "128961717706452")
+                    ) then
+                        descendant.Image = THEME.Logo
+                    end
+                end
+            end
+        end)
+
+        if menuIcon and type(window.AttachMenuIcon) == "function" then
+            pcall(window.AttachMenuIcon, window, menuIcon)
+        end
+
+        if type(window.CreateHomeTab) == "function" then
+            local didHome, homeError = pcall(function()
+                window:CreateHomeTab({
+                    Name = "Dashboard",
+                    Icon = "lucide:layout-dashboard",
+                    Content = "Solana Hub - Evade",
+                    DiscordInvite = THEME.Discord,
+                    SupportedExecutors = { "Delta", "Synapse X", "Krnl", "Codex", "Arceus X" },
+                    UnsupportedExecutors = { "Roblox Studio" },
+                    Segments = {
+                        Details = { Text = "Details", Icon = "lucide:grid-2x2" },
+                        Script = { Text = "Script Logs", Icon = "lucide:code" },
+                        UI = { Text = "UI Logs", Icon = "lucide:file-text", Show = true },
+                    },
+                    Changelog = {
+                        {
+                            Title = "Solana Hub Evade v1.0",
+                            Description = "Interface baru ModernV2. Semua fitur Evade dipindah ke tab Player, Utility, Map, Visual, Emote, dan Misc.",
+                        },
+                        {
+                            Title = "Solana Hub - Evade",
+                            Description = "Front Jump, Bhop, Layer Jumps, Impulse Jump, Auto Trimp, Infinite Slide, Emote Visual & Speed, Player ESP, Auto Ticket, Auto Escape, dan lainnya.",
+                        },
+                    },
+                    UIChangelog = {
+                        {
+                            Title = "ModernV2 Framework",
+                            Date = "Latest",
+                            Description = "Evade interface aligned with the Solana Hub Ride A Pet design.",
+                        },
+                    },
+                })
+            end)
+
+            if not didHome then
+                warn("[Solana Hub] Gagal membuat Dashboard: " .. tostring(homeError))
+            end
+        end
+
+        if type(window.ToggleInterface) == "function" then
+            local originalToggle = window.ToggleInterface
+
+            window.ToggleInterface = function(self, ...)
+                if window.Destroyed then
+                    return
+                end
+
+                local isOpen = window.Signal and window.Signal:GetValue()
+
+                if not isOpen then
+                    pcall(function()
+                        if window.Root and modern.ScreenGui then
+                            window.Root.Parent = modern.ScreenGui
+                            window.Root.Visible = true
+                        end
+                    end)
+                end
+
+                return originalToggle(self, ...)
+            end
+        end
+
+        pcall(function()
+            if type(window.SetAccount) == "function" then
+                window:SetAccount({
+                    Username = localPlayer.DisplayName,
+                    Profile = modern.UserProfile,
+                    Expires = THEME.Title,
+                })
+            end
+        end)
+
+        local tabs = {}
+        local homes = {}
+
+        for _, tabName in ipairs(TAB_ORDER) do
+            tabs[tabName] = buildTab(window, tabName)
+
+            for sectionName, subTab in pairs(tabs[tabName].Homes) do
+                homes[sectionName] = subTab
+            end
+        end
+
+        bridge._window = window
+
+        local wrapper = {}
+
+        function wrapper:Section(name)
+            name = tostring(name)
+
+            local home = homes[name]
+
+            if home then
+                return wrapHost(home, name, true)
+            end
+
+            local didSection, section = pcall(function()
+                return tabs.Misc.Raw:AddSection({
+                    Position = "Center",
+                    Name = name,
+                    Icon = "lucide:layers",
+                    Box = true,
+                    BoxBorder = true,
+                    Collapsible = true,
+                    Collapsed = false,
+                    Opened = true,
+                })
+            end)
+
+            assert(didSection and section, "Gagal membuat section: " .. name)
+
+            return wrapHost(section, name, false)
+        end
+
+        return wrapper
+    end
+
+    function bridge:Notify(cfg)
+        cfg = type(cfg) == "table" and cfg or {}
+
+        local icons = { Success = "lucide:check", Error = "lucide:x", Warning = "lucide:triangle-alert" }
+        local window = bridge._window
+
+        if not window then
+            return
+        end
+
+        pcall(function()
+            window:Notify({
+                Title = tostring(cfg.Title or THEME.Title),
+                Content = tostring(cfg.Content or ""),
+                Icon = icons[cfg.Type] or "lucide:bell",
+                Duration = tonumber(cfg.Duration) or 5,
+            })
+        end)
+    end
+
+    function bridge:Discord()
+        return THEME.Discord
+    end
+
+    function bridge:Destroy()
+        pcall(function()
+            if type(modern.Unload) == "function" then
+                modern:Unload()
+            end
+        end)
+    end
+
+    return bridge
+end)()
+
+local ui = uiLibrary:CreateWindow()
+getgenv().SolanaHubEvade = { Loaded = true }
+
+-- ============================================================================
+-- CORE
+-- ============================================================================
+local alive = true
+local connections = {}
+local unload
+
+local function track(connection)
+    connections[#connections + 1] = connection
+    return connection
+end
+
+local function loop(interval, fn)
+    task.spawn(function()
+        while alive do
+            pcall(fn)
+            task.wait(interval)
+        end
+    end)
+end
+
+local function getCharacterParts()
+    local character = localPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    return character, humanoid, root
+end
+
+local function flatLook()
+    local camera = workspace.CurrentCamera
+
+    if not camera then
+        return nil
+    end
+
+    local look = camera.CFrame.LookVector
+    local flat = Vector3.new(look.X, 0, look.Z)
+
+    if flat.Magnitude > 0 then
+        flat = flat.Unit
+    end
+
+    return flat
+end
+
+if not workspace:FindFirstChild("SecurityPart") then
+    local securityPart = Instance.new("Part")
+    securityPart.Name = "SecurityPart"
+    securityPart.Size = Vector3.new(10, 1, 10)
+    securityPart.Position = Vector3.new(5000, 5000, 5000)
+    securityPart.Anchored = true
+    securityPart.CanCollide = true
+    securityPart.Transparency = 1
+    securityPart.CanTouch = false
+    securityPart.Parent = workspace
+end
+
+local S = {
+    FrontJumpEnabled = false,
+    FrontJumpSpeed = 50,
+    FrontAutoJumpEnabled = true,
+    WalkEnabled = false,
+    WalkSpeed = 5,
+    JumpHeightEnabled = false,
+    JumpHeightValue = 50,
+    InfiniteSlide = false,
+    InfiniteSlideSpeed = 30,
+    AutoTrimpEnabled = false,
+    AutoTrimpSpeed = 50,
+    BhopEnabled = false,
+    GravityEnabled = false,
+    GravityScale = 0.5,
+    LayerJumpsEnabled = false,
+    LayerJumpsCount = 2,
+    ImpulseJumpEnabled = false,
+    ImpulseJumpSpeed = 42,
+    AutoTicketEnabled = false,
+    VoidEscapeEnabled = false,
+    PlayerESPEnabled = false,
+    ReviveAuraEnabled = false,
+    AutoCarryEnabled = false,
+    AutoForceSpawnEnabled = false,
+    AntiAfkEnabled = false,
+    SelectedEmote = nil,
+    EmoteEnabled = false,
+    EmoteVisualEnabled = false,
+    SelectedEmoteVisual = nil,
+    SelectedEmoteLabel = nil,
+    LagSwitchEnabled = false,
+    LagDuration = 0.5,
+    PotatoEnabled = false,
+    NoFogEnabled = false,
+    FullbrightEnabled = false,
+    NoclipEnabled = false,
+    TPWalkEnabled = false,
+    TPWalkSpeed = 37,
+    AutoEscapeEnabled = false,
+    AutoEscapeDistance = 35,
+}
+
+getgenv().FeatureStates = S
+
+-- flag untuk ESP eksternal (dimuat di tab Visual)
+_G.ESP_Active = false
+_G.ESP_ShowName = true
+_G.ESP_ShowBox = true
+_G.ESP_ShowDistance = true
+_G.ESP_ShowDown = true
+
+-- ---------------------------------------------------------------------------
+-- Registry fitur: satu sumber kebenaran untuk toggle UI, tombol floating, dan keybind
+-- ---------------------------------------------------------------------------
+local Features = {}
+local FeatureOrder = {}
+local floatingEnabled = true
+local floatingGuis = {}
+local createFloating
+
+local function syncFeature(feature)
+    local value = S[feature.Key] == true
+
+    if feature.Ui then
+        feature.Ui:Set(value)
+    end
+
+    if feature.NoFloat then
+        return
+    end
+
+    if value and not feature.Float then
+        feature.Float = createFloating(feature)
+    end
+
+    if feature.Float then
+        feature.Float.Gui.Enabled = floatingEnabled
+        feature.Float.Update(value)
+    end
+end
+
+local function setFeature(name, value)
+    local feature = Features[name]
+
+    if not feature then
+        return
+    end
+
+    value = value == true
+
+    if S[feature.Key] == value then
+        return
+    end
+
+    S[feature.Key] = value
+
+    if feature.OnChange then
+        local ok, err = pcall(feature.OnChange, value)
+
+        if not ok then
+            warn("[Solana Hub] " .. name .. ": " .. tostring(err))
+        end
+    end
+
+    syncFeature(feature)
+end
+
+local function defineFeature(name, key, title, onChange, noFloat)
+    local feature = {
+        Name = name,
+        Key = key,
+        Title = title,
+        OnChange = onChange,
+        NoFloat = noFloat == true,
+        FloatY = 0.08 + #FeatureOrder * 0.05,
+    }
+
+    Features[name] = feature
+    FeatureOrder[#FeatureOrder + 1] = name
+
+    return feature
+end
+
+local function addFeatureToggle(section, name, description)
+    local feature = Features[name]
+
+    feature.Ui = section:AddToggle({
+        Title = feature.Title,
+        Description = description,
+        Default = false,
+        Callback = function(value) setFeature(name, value) end,
+    })
+
+    return feature.Ui
+end
+
+createFloating = function(feature)
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "SolanaHub_" .. feature.Name .. "Toggle"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = playerGui
+    floatingGuis[#floatingGuis + 1] = screenGui
+
+    local button = Instance.new("Frame")
+    button.Name = "GradientBtn"
+    button.BackgroundTransparency = 0.7
+    button.Size = UDim2.new(0, 120, 0, 35)
+    button.Position = UDim2.new(0.02, 0, feature.FloatY, 0)
+    button.Draggable = true
+    button.Active = true
+    button.Selectable = true
+    button.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = button
+
+    local gradient = Instance.new("UIGradient")
+    gradient.Rotation = 45
+    gradient.Parent = button
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 2
+    stroke.Parent = button
+
+    local label = Instance.new("TextLabel")
+    label.Text = feature.Name
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextSize = 14
+    label.Font = Enum.Font.GothamMedium
+    label.Parent = button
+
+    local clickArea = Instance.new("TextButton")
+    clickArea.Size = UDim2.new(1, 0, 1, 0)
+    clickArea.BackgroundTransparency = 1
+    clickArea.Text = ""
+    clickArea.ZIndex = 5
+    clickArea.Active = false
+    clickArea.Selectable = false
+    clickArea.Parent = button
+
+    local isActive = false
+
+    local function paint()
+        if isActive then
+            gradient.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Color3.fromRGB(220, 35, 55)),
+                ColorSequenceKeypoint.new(1, Color3.fromRGB(120, 15, 30)),
+            })
+
+            stroke.Color = Color3.fromRGB(255, 80, 100)
+            label.TextColor3 = Color3.fromRGB(255, 255, 255)
+        else
+            gradient.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 200, 200)),
+                ColorSequenceKeypoint.new(1, Color3.fromRGB(150, 150, 150)),
+            })
+
+            stroke.Color = Color3.fromRGB(100, 100, 100)
+            label.TextColor3 = Color3.fromRGB(240, 240, 240)
+        end
+    end
+
+    clickArea.MouseButton1Click:Connect(function()
+        setFeature(feature.Name, not S[feature.Key])
+    end)
+
+    clickArea.MouseEnter:Connect(function()
+        stroke.Color = isActive and Color3.fromRGB(255, 120, 135) or Color3.fromRGB(130, 130, 130)
+    end)
+
+    clickArea.MouseLeave:Connect(paint)
+
+    paint()
+
+    return {
+        Gui = screenGui,
+        Update = function(value)
+            isActive = value == true
+            paint()
+        end,
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- Keybind (diatur dari tab Misc > Keys)
+-- ---------------------------------------------------------------------------
+local Keybinds = {}
+local KeybindConnections = {}
+
+local function bindKeybind(name)
+    if KeybindConnections[name] then
+        KeybindConnections[name]:Disconnect()
+        KeybindConnections[name] = nil
+    end
+
+    local keyName = Keybinds[name]
+
+    if not keyName or keyName == "" then
+        return
+    end
+
+    local didFind, keyCode = pcall(function() return Enum.KeyCode[keyName] end)
+
+    if not didFind or not keyCode then
+        return
+    end
+
+    KeybindConnections[name] = userInputService.InputBegan:Connect(function(input, isProcessed)
+        if isProcessed then
+            return
+        end
+
+        if input.KeyCode == keyCode then
+            local feature = Features[name]
+
+            if feature then
+                setFeature(name, not S[feature.Key])
+            end
+        end
+    end)
+end
+
+-- ============================================================================
+-- TAB PLAYER
+-- ============================================================================
+
+-- ---- Front Jump ----
+local frontJumpVelocity = nil
+
+local function stopFrontJump()
+    if frontJumpVelocity then
+        frontJumpVelocity:Destroy()
+        frontJumpVelocity = nil
+    end
+end
+
+local function startFrontJump()
+    stopFrontJump()
+
+    local character, humanoid, root = getCharacterParts()
+
+    if not humanoid or not root then
+        return
+    end
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.MaxForce = Vector3.new(400000, 0, 400000)
+    velocity.P = 1250
+    velocity.Velocity = Vector3.new(0, 0, 0)
+    velocity.Parent = root
+    frontJumpVelocity = velocity
+
+    task.spawn(function()
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = { character }
+
+        while alive and S.FrontJumpEnabled and frontJumpVelocity == velocity and velocity.Parent do
+            local direction = flatLook()
+
+            if direction then
+                velocity.Velocity = direction * S.FrontJumpSpeed
+
+                if S.FrontAutoJumpEnabled and humanoid:GetState() ~= Enum.HumanoidStateType.Jumping
+                    and workspace:Raycast(root.Position, Vector3.new(0, -4, 0), rayParams) then
+                    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                end
+            end
+
+            task.wait(0.016)
+        end
+
+        if frontJumpVelocity == velocity then
+            stopFrontJump()
+        end
+    end)
+end
+
+defineFeature("Front Jump", "FrontJumpEnabled", "Front Jump", function(isEnabled)
+    if isEnabled then
+        startFrontJump()
+    else
+        stopFrontJump()
+    end
+end)
+
+do
+    local section = ui:Section("Front Jump")
+
+    addFeatureToggle(section, "Front Jump", "Melompat ke depan dengan cepat")
+
+    section:AddSlider({
+        Title = "Front Jump Speed",
+        Description = "Kecepatan lompatan ke depan",
+        Min = 1, Max = 500, Default = 50, Increment = 1,
+        Callback = function(value) S.FrontJumpSpeed = value end,
+    })
+
+    section:AddToggle({
+        Title = "Auto Jump",
+        Description = "Melompat otomatis saat Front Jump aktif",
+        Default = true,
+        Callback = function(value) S.FrontAutoJumpEnabled = value end,
+    })
+end
+
+-- ---- Jump Height ----
+defineFeature("Jump Height", "JumpHeightEnabled", "Jump Height")
+
+loop(0.5, function()
+    if not S.JumpHeightEnabled then
+        return
+    end
+
+    local _, humanoid = getCharacterParts()
+
+    if humanoid and humanoid.Health > 0 then
+        humanoid.JumpPower = S.JumpHeightValue
+        humanoid.UseJumpPower = true
+    end
+end)
+
+do
+    local section = ui:Section("Jump Height")
+
+    addFeatureToggle(section, "Jump Height", "Mengatur tinggi lompatan (JumpPower)")
+
+    section:AddSlider({
+        Title = "Jump Height Value",
+        Description = "Nilai JumpPower",
+        Min = 20, Max = 300, Default = 50, Increment = 1,
+        Callback = function(value) S.JumpHeightValue = value end,
+    })
+end
+
+-- ---- Bhop ----
+local bhopCharacter, bhopHumanoid, bhopRoot = nil, nil, nil
+local bhopHoldActive = false
+
+local function refreshBhopCharacter(character)
+    if not character then
+        return
+    end
+
+    bhopCharacter = character
+    bhopHumanoid = character:WaitForChild("Humanoid")
+    bhopRoot = character:WaitForChild("HumanoidRootPart")
+end
+
+task.spawn(refreshBhopCharacter, localPlayer.Character)
+
+local function canBhopNow()
+    if not bhopCharacter or not bhopRoot or not bhopHumanoid then
+        return false
+    end
+
+    local state = bhopHumanoid:GetState()
+
+    if state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
+        or state == Enum.HumanoidStateType.Swimming then
+        return false
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = { bhopCharacter }
+    rayParams.IgnoreWater = true
+
+    local result = workspace:Raycast(bhopRoot.Position, Vector3.new(0, -4, 0), rayParams)
+
+    if not result then
+        return false
+    end
+
+    return math.deg(math.acos(result.Normal:Dot(Vector3.new(0, 1, 0)))) <= 45
+end
+
+track(userInputService.InputBegan:Connect(function(input, isProcessed)
+    if not isProcessed and input.KeyCode == Enum.KeyCode.Space then
+        bhopHoldActive = true
+    end
+end))
+
+track(userInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.Space then
+        bhopHoldActive = false
+    end
+end))
+
+track(runService.Heartbeat:Connect(function()
+    if (S.BhopEnabled or bhopHoldActive) and bhopHumanoid and canBhopNow() then
+        bhopHumanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end))
+
+defineFeature("Bhop", "BhopEnabled", "Bhop")
+
+do
+    local section = ui:Section("Bhop")
+
+    addFeatureToggle(section, "Bhop", "Melompat terus menerus saat di tanah. Menahan Space juga memicu bhop.")
+end
+
+-- ---- Layer Jumps ----
+local layerJumpsInstance = nil
+local originalJumpCap = nil
+
+local function findLayerJumpsInstance()
+    if layerJumpsInstance then
+        return layerJumpsInstance
+    end
+
+    local success, gcObjects = pcall(getgc, true)
+
+    if not success or not gcObjects then
+        return nil
+    end
+
+    for i = 1, #gcObjects do
+        local object = gcObjects[i]
+
+        if type(object) == "table" then
+            local ok, moveStats = pcall(rawget, object, "MoveStats")
+
+            if ok and type(moveStats) == "table" then
+                local ok2, jumpCap = pcall(rawget, moveStats, "JumpCap")
+
+                if ok2 and type(jumpCap) == "number" then
+                    layerJumpsInstance = object
+                    return object
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function applyLayerJumps()
+    if not S.LayerJumpsEnabled then
+        if layerJumpsInstance and originalJumpCap then
+            pcall(function()
+                local moveStats = rawget(layerJumpsInstance, "MoveStats")
+
+                if type(moveStats) == "table" then
+                    moveStats.JumpCap = originalJumpCap
+                end
+            end)
+
+            originalJumpCap = nil
+        end
+
+        return
+    end
+
+    local instance = findLayerJumpsInstance()
+
+    if not instance then
+        return
+    end
+
+    pcall(function()
+        local moveStats = rawget(instance, "MoveStats")
+
+        if type(moveStats) == "table" and type(moveStats.JumpCap) == "number" then
+            if not originalJumpCap then
+                originalJumpCap = moveStats.JumpCap ~= S.LayerJumpsCount and moveStats.JumpCap or 1
+            end
+
+            moveStats.JumpCap = S.LayerJumpsCount
+        end
+    end)
+end
+
+defineFeature("Layer Jumps", "LayerJumpsEnabled", "Layer Jumps", function(isEnabled)
+    if not isEnabled then
+        applyLayerJumps() -- kembalikan JumpCap asli
+    end
+end)
+
+do
+    local section = ui:Section("Layer Jumps")
+
+    addFeatureToggle(section, "Layer Jumps", "Multi-jump / lompat berlapis")
+
+    section:AddSlider({
+        Title = "Jump Count",
+        Description = "Jumlah lompatan berturut",
+        Min = 2, Max = 20, Default = 2, Increment = 1,
+        Callback = function(value) S.LayerJumpsCount = math.floor(value) end,
+    })
+end
+
+-- ---- Impulse Jump ----
+local impulseWasInAir = false
+local activeImpulseVelocity = nil
+
+local function clearImpulse()
+    impulseWasInAir = false
+
+    if activeImpulseVelocity then
+        activeImpulseVelocity:Destroy()
+        activeImpulseVelocity = nil
+    end
+end
+
+local function updateImpulseJump()
+    local _, humanoid, root = getCharacterParts()
+
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return
+    end
+
+    local isInAirNow = humanoid.FloorMaterial == Enum.Material.Air
+
+    if impulseWasInAir and not isInAirNow and activeImpulseVelocity then
+        activeImpulseVelocity:Destroy()
+        activeImpulseVelocity = nil
+    end
+
+    impulseWasInAir = isInAirNow
+
+    if not isInAirNow then
+        return
+    end
+
+    local direction = flatLook()
+
+    if not direction then
+        return
+    end
+
+    if activeImpulseVelocity then
+        activeImpulseVelocity:Destroy()
+    end
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.Velocity = direction * S.ImpulseJumpSpeed
+    velocity.MaxForce = Vector3.new(400000, 0, 400000)
+    velocity.P = 1250
+    velocity.Parent = root
+
+    debris:AddItem(velocity, 0.1)
+    activeImpulseVelocity = velocity
+end
+
+track(runService.Heartbeat:Connect(function()
+    pcall(function()
+        if S.LayerJumpsEnabled then
+            applyLayerJumps()
+        end
+
+        if S.ImpulseJumpEnabled then
+            updateImpulseJump()
+        end
+    end)
+end))
+
+defineFeature("Impulse Jump", "ImpulseJumpEnabled", "Impulse Jump", function(isEnabled)
+    if not isEnabled then
+        clearImpulse()
+    end
+end)
+
+do
+    local section = ui:Section("Impulse Jump")
+
+    addFeatureToggle(section, "Impulse Jump", "Lompat dengan dorongan ke depan")
+
+    section:AddSlider({
+        Title = "Impulse Speed",
+        Description = "Kekuatan dorongan",
+        Min = 10, Max = 120, Default = 42, Increment = 1,
+        Callback = function(value) S.ImpulseJumpSpeed = value end,
+    })
+end
+
+-- ---- Auto Trimp ----
+local trimp = { lastTick = tick(), airAccumulator = 0, wasAir = false, activeBV = nil, currentSpeed = 50, connection = nil }
+local TRIMP_MAX_EXTRA = 100
+
+local function getSpeedometerLabel()
+    local success, label = pcall(function()
+        return localPlayer.PlayerGui.Shared.HUD.Overlay.Default.CharacterInfo.Item.Speedometer.Players
+    end)
+
+    return success and label or nil
+end
+
+local function stopAutoTrimp()
+    if trimp.connection then
+        trimp.connection:Disconnect()
+        trimp.connection = nil
+    end
+
+    if trimp.activeBV then
+        trimp.activeBV:Destroy()
+        trimp.activeBV = nil
+    end
+
+    trimp.currentSpeed = S.AutoTrimpSpeed
+    trimp.airAccumulator = 0
+    trimp.wasAir = false
+end
+
+local function updateAutoTrimp()
+    local now = tick()
+    local deltaTime = now - trimp.lastTick
+    trimp.lastTick = now
+
+    local _, humanoid, root = getCharacterParts()
+
+    if not humanoid or not root then
+        return
+    end
+
+    local base = S.AutoTrimpSpeed
+    local label = getSpeedometerLabel()
+    local isInAir = humanoid.FloorMaterial == Enum.Material.Air
+
+    if trimp.wasAir and not isInAir then
+        trimp.currentSpeed = math.max(base, trimp.currentSpeed - 10)
+
+        if label then
+            label.Text = tostring(math.floor(trimp.currentSpeed * 10) / 10)
+        end
+    end
+
+    trimp.wasAir = isInAir
+
+    if isInAir then
+        trimp.airAccumulator = trimp.airAccumulator + deltaTime
+
+        while trimp.airAccumulator >= 0.04 do
+            trimp.airAccumulator = trimp.airAccumulator - 0.04
+            trimp.currentSpeed = math.min(base + TRIMP_MAX_EXTRA, trimp.currentSpeed + 0.1)
+        end
+    else
+        trimp.airAccumulator = 0
+        trimp.currentSpeed = math.max(base, trimp.currentSpeed - 4 * deltaTime)
+    end
+
+    if trimp.activeBV then
+        trimp.activeBV:Destroy()
+        trimp.activeBV = nil
+    end
+
+    local direction = flatLook()
+
+    if not direction then
+        return
+    end
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.Velocity = direction * trimp.currentSpeed
+    velocity.MaxForce = Vector3.new(400000, 0, 400000)
+    velocity.P = 1250
+    velocity.Parent = root
+
+    debris:AddItem(velocity, 0.1)
+    trimp.activeBV = velocity
+
+    if label then
+        label.Text = tostring(math.floor(trimp.currentSpeed * 10) / 10)
+    end
+end
+
+defineFeature("AutoTrimp", "AutoTrimpEnabled", "Auto Trimp", function(isEnabled)
+    if isEnabled then
+        trimp.currentSpeed = S.AutoTrimpSpeed
+        trimp.lastTick = tick()
+
+        if not trimp.connection then
+            trimp.connection = runService.RenderStepped:Connect(updateAutoTrimp)
+        end
+    else
+        stopAutoTrimp()
+    end
+end)
+
+do
+    local section = ui:Section("Auto Trimp")
+
+    addFeatureToggle(section, "AutoTrimp", "Meningkatkan kecepatan saat di udara")
+
+    section:AddSlider({
+        Title = "Auto Trimp Speed",
+        Description = "Kecepatan dasar",
+        Min = 10, Max = 300, Default = 50, Increment = 1,
+        Callback = function(value)
+            S.AutoTrimpSpeed = value
+            trimp.currentSpeed = value
+        end,
+    })
+end
+
+-- ---- Teleport Walk ----
+local walkConnection = nil
+
+defineFeature("Walk", "WalkEnabled", "Walk (Teleport)", function(isEnabled)
+    if isEnabled and not walkConnection then
+        walkConnection = runService.Heartbeat:Connect(function()
+            local character, humanoid = getCharacterParts()
+
+            if not character or not character.PrimaryPart or not humanoid or humanoid.Health <= 0 then
+                return
+            end
+
+            if humanoid.MoveDirection.Magnitude > 0 then
+                pcall(function()
+                    character:TranslateBy(humanoid.MoveDirection * S.WalkSpeed * 0.1)
+                end)
+            end
+        end)
+    elseif not isEnabled and walkConnection then
+        walkConnection:Disconnect()
+        walkConnection = nil
+    end
+end)
+
+do
+    local section = ui:Section("Teleport Walk")
+
+    addFeatureToggle(section, "Walk", "Jalan cepat pakai TranslateBy")
+
+    section:AddSlider({
+        Title = "Walk Speed",
+        Description = "Kecepatan Walk",
+        Min = 1, Max = 50, Default = 5, Increment = 1,
+        Callback = function(value) S.WalkSpeed = value end,
+    })
+end
+
+-- ---- Infinite Slide ----
+local slideState = { inSlide = false, slideDir = Vector3.new(0, 0, 1) }
+local activeSlideVelocity = nil
+local slideConnection = nil
+local slideKeys = { Enum.KeyCode.LeftControl, Enum.KeyCode.C }
+
+local function clearSlide()
+    slideState.inSlide = false
+
+    if activeSlideVelocity then
+        activeSlideVelocity:Destroy()
+        activeSlideVelocity = nil
+    end
+end
+
+local function isSlideKeyPressed()
+    if userInputService.KeyboardEnabled then
+        for _, key in ipairs(slideKeys) do
+            if userInputService:IsKeyDown(key) then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    if userInputService.GamepadEnabled then
+        local success, isPressed = pcall(function()
+            return userInputService:IsGamepadButtonDown(Enum.UserInputType.Gamepad1, Enum.KeyCode.ButtonR2)
+        end)
+
+        if success then
+            return isPressed
+        end
+    end
+
+    return nil
+end
+
+local function getSlideDirection(character, root)
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+    if humanoid then
+        local move = humanoid.MoveDirection
+        local flat = Vector3.new(move.X, 0, move.Z)
+
+        if flat.Magnitude > 0.1 then
+            return flat.Unit
+        end
+    end
+
+    local look = flatLook()
+
+    if look and look.Magnitude > 0.1 then
+        return look
+    end
+
+    local velocity = root.AssemblyLinearVelocity
+    local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+
+    if flatVelocity.Magnitude > 0.1 then
+        return flatVelocity.Unit
+    end
+
+    return slideState.slideDir
+end
+
+local function updateInfiniteSlide()
+    local character, _, root = getCharacterParts()
+    local slideFolder = root and root:FindFirstChild("Slide")
+    local slideSound = slideFolder and slideFolder:FindFirstChild("SlideSound")
+
+    if not character or not root or not slideSound then
+        clearSlide()
+        return
+    end
+
+    if slideSound.Playing then
+        if not slideState.inSlide then
+            slideState.inSlide = true
+            local velocity = root.AssemblyLinearVelocity
+            local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+
+            if flatVelocity.Magnitude > 0.1 then
+                slideState.slideDir = flatVelocity.Unit
+            end
+        end
+    elseif not slideState.inSlide then
+        clearSlide()
+        return
+    end
+
+    local isKeyHeld = isSlideKeyPressed()
+
+    if isKeyHeld == false or isKeyHeld == nil and not slideSound.Playing then
+        clearSlide()
+        return
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = { character }
+
+    local result = workspace:Raycast(root.Position, Vector3.new(0, -4, 0), rayParams)
+    local normal = result and result.Normal or Vector3.new(0, 1, 0)
+
+    slideState.slideDir = getSlideDirection(character, root)
+
+    local slideDir = slideState.slideDir
+    local projected = slideDir - normal * slideDir:Dot(normal)
+
+    if projected.Magnitude > 0.01 then
+        projected = projected.Unit
+    else
+        projected = slideDir
+    end
+
+    if activeSlideVelocity then
+        activeSlideVelocity:Destroy()
+    end
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.Velocity = projected * S.InfiniteSlideSpeed
+    velocity.MaxForce = Vector3.new(400000, 400000, 400000)
+    velocity.P = 10000
+    velocity.Parent = root
+
+    debris:AddItem(velocity, 0.1)
+    activeSlideVelocity = velocity
+end
+
+defineFeature("Inf Slide", "InfiniteSlide", "Infinite Slide", function(isEnabled)
+    if isEnabled then
+        if not slideConnection then
+            slideConnection = runService.Heartbeat:Connect(updateInfiniteSlide)
+        end
+    else
+        clearSlide()
+
+        if slideConnection then
+            slideConnection:Disconnect()
+            slideConnection = nil
+        end
+    end
+end)
+
+do
+    local section = ui:Section("Infinite Slide")
+
+    addFeatureToggle(section, "Inf Slide", "Slide tanpa batas. Tahan Left Ctrl atau C saat slide.")
+
+    section:AddSlider({
+        Title = "Slide Speed",
+        Description = "Kecepatan slide",
+        Min = 15, Max = 150, Default = 30, Increment = 1,
+        Callback = function(value) S.InfiniteSlideSpeed = value end,
+    })
+end
+
+-- ---- Movement Stats (Speed / Jump Cap / Air Strafe) ----
+local MOVEMENT_STATS_KEYS = {
+    "Friction", "AirStrafeAcceleration", "JumpHeight", "RunDeaccel", "JumpSpeedMultiplier",
+    "JumpCap", "SprintCap", "WalkSpeedMultiplier", "BhopEnabled", "Speed", "AirAcceleration",
+    "RunAccel", "SprintAcceleration",
+}
+
+local function findMovementStatsTables()
+    local results = {}
+
+    for _, value in pairs(getgc(true)) do
+        if typeof(value) == "table" then
+            local hasAllKeys = true
+
+            for _, key in ipairs(MOVEMENT_STATS_KEYS) do
+                if rawget(value, key) == nil then
+                    hasAllKeys = false
+                    break
+                end
+            end
+
+            if hasAllKeys then
+                results[#results + 1] = value
+            end
+        end
+    end
+
+    return results
+end
+
+local function setMovementStat(statName, value)
+    for _, statsTable in ipairs(findMovementStatsTables()) do
+        pcall(function() statsTable[statName] = value end)
+    end
+end
+
+do
+    local section = ui:Section("Movement Stats")
+
+    section:AddInput({
+        Title = "Speed",
+        Description = "Kecepatan gerakan (1450 - 100008888, default 1500)",
+        Default = "1500",
+        Placeholder = "Default 1500",
+        Callback = function(text)
+            local value = tonumber(text)
+
+            if value and value >= 1450 and value <= 100008888 then
+                setMovementStat("Speed", value)
+            end
+        end,
+    })
+
+    section:AddInput({
+        Title = "Jump Cap",
+        Description = "Batas ketinggian lompatan (0.1 - 5088888, default 1)",
+        Default = "1",
+        Placeholder = "Default 1",
+        Callback = function(text)
+            local value = tonumber(text)
+
+            if value and value >= 0.1 and value <= 5088888 then
+                setMovementStat("JumpCap", value)
+            end
+        end,
+    })
+
+    section:AddInput({
+        Title = "Air Strafe",
+        Description = "Akselerasi saat di udara (1 - 1000888888, default 187)",
+        Default = "187",
+        Placeholder = "Default 187",
+        Callback = function(text)
+            local value = tonumber(text)
+
+            if value and value >= 1 and value <= 1000888888 then
+                setMovementStat("AirStrafeAcceleration", value)
+            end
+        end,
+    })
+end
+
+-- ---- Gravity ----
+defineFeature("Gravity", "GravityEnabled", "Gravity Mod")
+
+loop(0.1, function()
+    if not S.GravityEnabled then
+        return
+    end
+
+    local _, humanoid, root = getCharacterParts()
+
+    if humanoid and root and humanoid.Health > 0 then
+        local velocity = root.AssemblyLinearVelocity
+
+        if velocity.Y < 0 then
+            root.AssemblyLinearVelocity = Vector3.new(velocity.X, velocity.Y * S.GravityScale, velocity.Z)
+        end
+    end
+end)
+
+do
+    local section = ui:Section("Gravity Mod")
+
+    addFeatureToggle(section, "Gravity", "Mengurangi gravitasi saat jatuh")
+
+    section:AddSlider({
+        Title = "Gravity Scale",
+        Description = "Nilai gravitasi (makin kecil makin ringan)",
+        Min = 0.1, Max = 2, Default = 0.5, Increment = 0.1,
+        Callback = function(value) S.GravityScale = value end,
+    })
+end
+
+-- ---- Respawn handling untuk fitur Player ----
+track(localPlayer.CharacterRemoving:Connect(function()
+    stopFrontJump()
+    clearSlide()
+    clearImpulse()
+
+    if trimp.activeBV then
+        trimp.activeBV:Destroy()
+        trimp.activeBV = nil
+    end
+
+    layerJumpsInstance = nil
+    originalJumpCap = nil
+end))
+
+track(localPlayer.CharacterAdded:Connect(function(character)
+    task.spawn(refreshBhopCharacter, character)
+
+    if S.FrontJumpEnabled then
+        task.wait(0.5)
+        startFrontJump()
+    end
+end))
+
+-- ============================================================================
+-- TAB UTILITY
+-- ============================================================================
+
+-- ---- Noclip & TPWalk ----
+local noclipConnection = nil
+local tpwalkConnection = nil
+
+defineFeature("Noclip", "NoclipEnabled", "Noclip", function(isEnabled)
+    if isEnabled then
+        if noclipConnection then
+            noclipConnection:Disconnect()
+        end
+
+        noclipConnection = runService.Stepped:Connect(function()
+            local character = localPlayer.Character
+
+            if character then
+                for _, part in ipairs(character:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = false
+                    end
+                end
+            end
+        end)
+    else
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+
+        local character = localPlayer.Character
+
+        if character then
+            for _, part in ipairs(character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = true
+                end
+            end
+        end
+    end
+end)
+
+defineFeature("TPWalk", "TPWalkEnabled", "TPWalk", function(isEnabled)
+    if isEnabled then
+        if tpwalkConnection then
+            tpwalkConnection:Disconnect()
+        end
+
+        tpwalkConnection = runService.Heartbeat:Connect(function()
+            local _, humanoid, root = getCharacterParts()
+
+            if root and humanoid and humanoid.MoveDirection.Magnitude > 0 then
+                root.CFrame = root.CFrame + humanoid.MoveDirection * S.TPWalkSpeed * 0.05
+            end
+        end)
+    elseif tpwalkConnection then
+        tpwalkConnection:Disconnect()
+        tpwalkConnection = nil
+    end
+end)
+
+do
+    local section = ui:Section("Movement")
+
+    addFeatureToggle(section, "Noclip", "Melewati dinding dan rintangan")
+    addFeatureToggle(section, "TPWalk", "Berjalan dengan kecepatan tinggi (teleport per frame)")
+
+    section:AddSlider({
+        Title = "TPWalk Speed",
+        Description = "Kecepatan TPWalk",
+        Min = 1, Max = 200, Default = 37, Increment = 1,
+        Callback = function(value) S.TPWalkSpeed = value end,
+    })
+end
+
+-- ---- Auto Escape (Anti-Bot) ----
+-- Bot = model di workspace.Players dengan atribut AI = true.
+-- Jika ada bot dalam jarak tertentu, karakter teleport ke salah satu ItemSpawns.
+loop(0.1, function()
+    if not S.AutoEscapeEnabled then
+        return
+    end
+
+    local _, _, root = getCharacterParts()
+    local playersFolder = workspace:FindFirstChild("Players")
+    local mapFolder = workspace:FindFirstChild("Map")
+    local itemSpawns = mapFolder and mapFolder:FindFirstChild("ItemSpawns")
+
+    if not root or not playersFolder or not itemSpawns then
+        return
+    end
+
+    for _, aiModel in ipairs(playersFolder:GetChildren()) do
+        local aiRoot = aiModel:GetAttribute("AI") == true and aiModel:FindFirstChild("HumanoidRootPart")
+
+        if aiRoot and (root.Position - aiRoot.Position).Magnitude < S.AutoEscapeDistance then
+            local spawns = itemSpawns:GetChildren()
+
+            if #spawns > 0 then
+                root.CFrame = spawns[math.random(1, #spawns)].CFrame
+                task.wait(0.5)
+                return
+            end
+        end
+    end
+end)
+
+do
+    local section = ui:Section("Auto Escape")
+
+    section:AddToggle({
+        Title = "Auto Escape",
+        Description = "Menghindari bot dengan teleportasi ke item spawn",
+        Default = false,
+        Callback = function(value) S.AutoEscapeEnabled = value end,
+    })
+
+    section:AddSlider({
+        Title = "Anti-Bot Distance",
+        Description = "Jarak deteksi bot",
+        Min = 5, Max = 200, Default = 35, Increment = 1,
+        Callback = function(value) S.AutoEscapeDistance = value end,
+    })
+end
+
+-- ---- Lag Switch ----
+local function triggerLagSpike()
+    task.spawn(function()
+        local startTime = tick()
+
+        while tick() - startTime < S.LagDuration do
+        end
+    end)
+end
+
+defineFeature("Lag Switch", "LagSwitchEnabled", "Lag Switch", function(isEnabled)
+    if isEnabled then
+        triggerLagSpike()
+
+        -- Lag Switch itu aksi sesaat: toggle otomatis mati lagi setelah lag selesai
+        task.delay(S.LagDuration + 0.2, function()
+            setFeature("Lag Switch", false)
+        end)
+    end
+end)
+
+do
+    local section = ui:Section("Lag Switch")
+
+    addFeatureToggle(section, "Lag Switch", "Membuat lag sementara (otomatis mati setelah selesai)")
+
+    section:AddSlider({
+        Title = "Lag Duration",
+        Description = "Durasi lag dalam detik",
+        Min = 0.1, Max = 10, Default = 0.5, Increment = 0.1,
+        Callback = function(value) S.LagDuration = value end,
+    })
+end
+
+-- ---- Graphics ----
+local function applyPotatoMode()
+    if not S.PotatoEnabled then
+        return
+    end
+
+    for _, descendant in ipairs(game:GetDescendants()) do
+        if descendant:IsA("Part") or descendant:IsA("MeshPart") then
+            descendant.Material = Enum.Material.SmoothPlastic
+        elseif descendant:IsA("Decal") or descendant:IsA("Texture") then
+            descendant.Transparency = 1
+        end
+    end
+end
+
+local function applyNoFog()
+    if S.NoFogEnabled then
+        lighting.FogEnd = 100000
+
+        local atmosphere = lighting:FindFirstChildOfClass("Atmosphere")
+
+        if atmosphere then
+            atmosphere.Density = 0
+        end
+    else
+        lighting.FogEnd = 2500
+    end
+end
+
+local function applyFullbright()
+    if S.FullbrightEnabled then
+        lighting.Ambient = Color3.fromRGB(255, 255, 255)
+        lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+        lighting.ExposureCompensation = 1
+    else
+        lighting.Ambient = Color3.fromRGB(0, 0, 0)
+        lighting.ExposureCompensation = 0
+    end
+end
+
+defineFeature("Potato", "PotatoEnabled", "Potato Mode", function() applyPotatoMode() end)
+defineFeature("No Fog", "NoFogEnabled", "No Fog", function() applyNoFog() end)
+defineFeature("Fullbright", "FullbrightEnabled", "Fullbright", function() applyFullbright() end)
+
+-- game bisa mengembalikan lighting sendiri, jadi diterapkan ulang tiap 60 detik
+loop(60, function()
+    if S.PotatoEnabled or S.NoFogEnabled or S.FullbrightEnabled then
+        applyPotatoMode()
+        applyNoFog()
+        applyFullbright()
+    end
+end)
+
+do
+    local section = ui:Section("Graphics")
+
+    addFeatureToggle(section, "Potato", "Mengurangi kualitas grafis (tidak bisa dikembalikan tanpa rejoin)")
+    addFeatureToggle(section, "No Fog", "Menghilangkan efek kabut")
+    addFeatureToggle(section, "Fullbright", "Menerangkan seluruh area")
+end
+
+-- ============================================================================
+-- TAB MAP
+-- ============================================================================
+track(localPlayer.Idled:Connect(function()
+    if not S.AntiAfkEnabled then
+        return
+    end
+
+    pcall(function()
+        virtualUser:CaptureController()
+        virtualUser:ClickButton2(Vector2.new())
+    end)
+end))
+
+loop(0.2, function()
+    if not S.VoidEscapeEnabled then
+        return
+    end
+
+    local _, _, root = getCharacterParts()
+
+    if root then
+        root.CFrame = CFrame.new(0, 9000000000, 0)
+    end
+end)
+
+-- ---- Auto Ticket ----
+-- Teleport ke setiap ticket di workspace.Effects.Tickets, dengan jeda 0.2 detik per ticket.
+loop(0.1, function()
+    if not S.AutoTicketEnabled then
+        return
+    end
+
+    local _, humanoid, root = getCharacterParts()
+    local effects = workspace:FindFirstChild("Effects")
+    local tickets = effects and effects:FindFirstChild("Tickets")
+
+    if not root or not humanoid or humanoid.Health <= 0 or not tickets then
+        return
+    end
+
+    for _, ticket in ipairs(tickets:GetChildren()) do
+        if not S.AutoTicketEnabled then
+            break
+        end
+
+        local ticketRoot = ticket:FindFirstChild("HumanoidRootPart")
+
+        if ticketRoot and ticket.Parent then
+            root.CFrame = ticketRoot.CFrame
+            task.wait(0.2)
+        end
+    end
+end)
+
+do
+    local setPlayerModeRemote = nil
+    local characterRegistry = nil
+    local lastForceSpawnTick = 0
+
+    local function getSetPlayerModeRemote()
+        if setPlayerModeRemote then
+            return setPlayerModeRemote
+        end
+
+        local success, remote = pcall(function()
+            return replicatedStorage:WaitForChild("Events", 10):WaitForChild("SetPlayerMode", 5)
+        end)
+
+        if success and remote then
+            setPlayerModeRemote = remote
+        end
+
+        return setPlayerModeRemote
+    end
+
+    local function findCharacterRegistry()
+        if characterRegistry then
+            return characterRegistry
+        end
+
+        local success, gcObjects = pcall(getgc, true)
+
+        if not success or not gcObjects then
+            return nil
+        end
+
+        for i = 1, #gcObjects do
+            local object = gcObjects[i]
+
+            if type(object) == "table" then
+                local ok, getCharacters = pcall(rawget, object, "GetCharacters")
+
+                if ok and getCharacters then
+                    characterRegistry = object
+                    return object
+                end
+            end
+        end
+
+        return nil
+    end
+
+    loop(0.2, function()
+        if not S.AutoForceSpawnEnabled then
+            return
+        end
+
+        local now = tick()
+
+        if now - lastForceSpawnTick < 3 then
+            return
+        end
+
+        local registry = findCharacterRegistry()
+
+        if not registry then
+            return
+        end
+
+        local success, characters = pcall(function() return registry:GetCharacters() end)
+
+        if not success or not characters then
+            characterRegistry = nil
+            return
+        end
+
+        for i = 1, #characters do
+            local entry = characters[i]
+
+            if type(entry) == "table" and entry.Done and entry.Local then
+                local stateSuccess, isDowned = pcall(function()
+                    return entry.State and entry.State.State == "Downed"
+                end)
+
+                if stateSuccess and isDowned then
+                    lastForceSpawnTick = now
+                    local remote = getSetPlayerModeRemote()
+
+                    if remote then
+                        pcall(function() remote:FireServer(true) end)
+                    end
+                end
+
+                break
+            end
+        end
+    end)
+end
+
+do
+    local section = ui:Section("Map Features")
+
+    section:AddToggle({
+        Title = "Auto Ticket",
+        Description = "Teleport ke setiap ticket event yang muncul",
+        Default = false,
+        Callback = function(value) S.AutoTicketEnabled = value end,
+    })
+
+    section:AddToggle({
+        Title = "Void Escape",
+        Description = "Lempar karakter ke atas langit",
+        Default = false,
+        Callback = function(value) S.VoidEscapeEnabled = value end,
+    })
+
+    section:AddToggle({
+        Title = "Anti AFK",
+        Description = "Cegah kick karena idle",
+        Default = false,
+        Callback = function(value) S.AntiAfkEnabled = value end,
+    })
+
+    section:AddToggle({
+        Title = "Auto Force Spawn",
+        Description = "Force spawn saat di-downed",
+        Default = false,
+        Callback = function(value) S.AutoForceSpawnEnabled = value end,
+    })
+end
+
+do
+    local section = ui:Section("Team Support")
+
+    section:AddToggle({
+        Title = "Revive Aura",
+        Description = "Auto revive pemain downed di dekatmu (belum terhubung ke logic, sama seperti versi lama)",
+        Default = false,
+        Callback = function(value) S.ReviveAuraEnabled = value end,
+    })
+
+    section:AddToggle({
+        Title = "Auto Carry",
+        Description = "Auto carry pemain downed di dekatmu (belum terhubung ke logic, sama seperti versi lama)",
+        Default = false,
+        Callback = function(value) S.AutoCarryEnabled = value end,
+    })
+end
+
+-- ============================================================================
+-- TAB VISUAL (Player ESP + ESP eksternal)
+-- ============================================================================
+local espClearAll
+
+do
+    local rigServiceModule = nil
+    local whistleHighlightTemplate = nil
+    local espEntries = {}
+    local defaultHighlightColor = Color3.fromRGB(255, 255, 255)
+    local downedHighlightColor = Color3.fromRGB(255, 70, 70)
+
+    task.spawn(function()
+        pcall(function()
+            local servicesFolder = replicatedStorage:WaitForChild("Services", 5)
+            local assetFolder = servicesFolder and servicesFolder:WaitForChild("Asset", 5)
+            local rigServiceFolder = assetFolder and assetFolder:WaitForChild("RigService", 5)
+
+            if rigServiceFolder then
+                rigServiceModule = require(rigServiceFolder)
+            end
+        end)
+
+        pcall(function()
+            local objectsFolder = replicatedStorage:WaitForChild("Objects", 5)
+            local gameFolder = objectsFolder and objectsFolder:WaitForChild("Game", 5)
+            local characterFolder = gameFolder and gameFolder:WaitForChild("Character", 5)
+            local actionVisualsFolder = characterFolder and characterFolder:WaitForChild("ActionVisuals", 5)
+            local actionsFolder = actionVisualsFolder and actionVisualsFolder:WaitForChild("Actions", 5)
+            local whistleFolder = actionsFolder and actionsFolder:WaitForChild("Whistle", 5)
+            whistleHighlightTemplate = whistleFolder and whistleFolder:FindFirstChild("WhistleHighlight")
+        end)
+    end)
+
+    local function safeDisconnect(connection)
+        if connection then
+            pcall(function() connection:Disconnect() end)
+        end
+    end
+
+    local function updateEspHighlight(entry)
+        if not entry or not entry.highlight then
+            return
+        end
+
+        local targetColor = entry.downed and downedHighlightColor or defaultHighlightColor
+
+        pcall(function()
+            entry.highlight.FillColor = targetColor
+            entry.highlight.OutlineColor = targetColor
+        end)
+    end
+
+    local function cleanupEspEntry(entry)
+        if not entry then
+            return
+        end
+
+        safeDisconnect(entry.died)
+        entry.died = nil
+
+        if entry.highlight then
+            pcall(function() entry.highlight:Destroy() end)
+            entry.highlight = nil
+        end
+
+        if entry.billboard then
+            pcall(function() entry.billboard:Destroy() end)
+            entry.billboard = nil
+        end
+
+        entry.label = nil
+        entry.root = nil
+        entry.visualRoot = nil
+        entry.visualModel = nil
+        entry.rigData = nil
+        entry.downed = false
+        entry.humanoid = nil
+        entry.character = nil
+    end
+
+    local function removePlayerEsp(player)
+        local entry = espEntries[player]
+
+        if not entry then
+            return
+        end
+
+        safeDisconnect(entry.characterAdded)
+        safeDisconnect(entry.characterRemoving)
+
+        cleanupEspEntry(entry)
+        espEntries[player] = nil
+    end
+
+    local function getRigFromTag(character)
+        if not rigServiceModule or not character then
+            return nil
+        end
+
+        local tag = character:GetAttribute("Tag")
+
+        if not tag then
+            return nil
+        end
+
+        local success, rigData = pcall(function() return rigServiceModule:GetRigFromTag(tag) end)
+
+        if success and rigData and rigData.Model and rigData.Model:IsA("Model") then
+            return rigData
+        end
+
+        return nil
+    end
+
+    local function resolveVisualModel(player, character)
+        local rigData = getRigFromTag(character)
+        local model = rigData and rigData.Model or nil
+
+        if model then
+            local rootPart = model:FindFirstChild("HumanoidRootPart", true)
+                or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+
+            if rootPart then
+                return model, rootPart, rigData
+            end
+        end
+
+        local playersFolder = workspace:FindFirstChild("Players")
+        model = playersFolder and playersFolder:FindFirstChild(player.Name)
+
+        if model and model:IsA("Model") then
+            local rootPart = model:FindFirstChild("HumanoidRootPart", true)
+                or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+
+            if rootPart then
+                return model, rootPart, nil
+            end
+        end
+
+        return character, character and character:FindFirstChild("HumanoidRootPart"), nil
+    end
+
+    local function isPlayerDowned(rigData, character)
+        if rigData and rigData.DataRegistry then
+            local success, value = pcall(function() return rigData.DataRegistry:Get("Downed") end)
+
+            if success and value == true then
+                return true
+            end
+
+            local success2, state = pcall(function() return rigData.DataRegistry:Get("State") end)
+
+            if success2 and state == "Downed" then
+                return true
+            end
+        end
+
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        return humanoid ~= nil and humanoid.Health <= 0
+    end
+
+    local function buildPlayerEsp(player, character)
+        if player == localPlayer then
+            return
+        end
+
+        local entry = espEntries[player]
+
+        if not entry then
+            entry = {}
+            espEntries[player] = entry
+        else
+            cleanupEspEntry(entry)
+        end
+
+        local humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+        if not character or not humanoidRootPart or not humanoid then
+            return
+        end
+
+        local visualModel, visualRoot, rigData = resolveVisualModel(player, character)
+
+        if not visualModel or not visualRoot then
+            return
+        end
+
+        local existingHighlight = character:FindFirstChild("SolanaHub_PlayerESP_Highlight")
+
+        if existingHighlight then
+            existingHighlight:Destroy()
+        end
+
+        local existingLabel = visualRoot:FindFirstChild("SolanaHub_PlayerESP_Label")
+
+        if existingLabel then
+            existingLabel:Destroy()
+        end
+
+        local espHighlight
+
+        if whistleHighlightTemplate then
+            espHighlight = whistleHighlightTemplate:Clone()
+        else
+            espHighlight = Instance.new("Highlight")
+            espHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            espHighlight.FillTransparency = 1
+            espHighlight.OutlineTransparency = 0
+        end
+
+        espHighlight.Name = "SolanaHub_PlayerESP_Highlight"
+        espHighlight.Adornee = visualModel
+        espHighlight.Enabled = S.PlayerESPEnabled
+        espHighlight.Parent = character
+
+        local espBillboard = Instance.new("BillboardGui")
+        espBillboard.Name = "SolanaHub_PlayerESP_Label"
+        espBillboard.Adornee = visualRoot
+        espBillboard.AlwaysOnTop = true
+        espBillboard.LightInfluence = 0
+
+        pcall(function() espBillboard.MaxDistance = math.huge end)
+
+        espBillboard.Size = UDim2.new(0, 360, 0, 42)
+        espBillboard.StudsOffset = Vector3.new(0, 3.8, 0)
+        espBillboard.Enabled = S.PlayerESPEnabled
+        espBillboard.Parent = visualRoot
+
+        local infoLabel = Instance.new("TextLabel")
+        infoLabel.Name = "Info"
+        infoLabel.BackgroundTransparency = 1
+        infoLabel.Size = UDim2.new(1, 0, 1, 0)
+        infoLabel.Font = Enum.Font.GothamBold
+        infoLabel.TextColor3 = defaultHighlightColor
+        infoLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+        infoLabel.TextStrokeTransparency = 0
+        infoLabel.TextSize = 18
+        infoLabel.TextXAlignment = Enum.TextXAlignment.Center
+        infoLabel.TextYAlignment = Enum.TextYAlignment.Center
+        infoLabel.Text = player.DisplayName
+        infoLabel.Parent = espBillboard
+
+        entry.character = character
+        entry.root = humanoidRootPart
+        entry.visualModel = visualModel
+        entry.visualRoot = visualRoot
+        entry.rigData = rigData
+        entry.downed = isPlayerDowned(rigData, character)
+        entry.humanoid = humanoid
+        entry.highlight = espHighlight
+        entry.billboard = espBillboard
+        entry.label = infoLabel
+
+        updateEspHighlight(entry)
+
+        entry.died = humanoid.Died:Connect(function()
+            if espEntries[player] == entry then
+                entry.downed = true
+                updateEspHighlight(entry)
+            end
+        end)
+    end
+
+    local function watchPlayerEsp(player)
+        if player == localPlayer then
+            return
+        end
+
+        removePlayerEsp(player)
+
+        espEntries[player] = {
+            characterAdded = player.CharacterAdded:Connect(function(character)
+                task.defer(function()
+                    if S.PlayerESPEnabled and character:WaitForChild("HumanoidRootPart", 5)
+                        and character:FindFirstChildOfClass("Humanoid") then
+                        buildPlayerEsp(player, character)
+                    end
+                end)
+            end),
+            characterRemoving = player.CharacterRemoving:Connect(function()
+                cleanupEspEntry(espEntries[player])
+            end),
+        }
+
+        if player.Character then
+            buildPlayerEsp(player, player.Character)
+        end
+    end
+
+    espClearAll = function()
+        for player in pairs(espEntries) do
+            removePlayerEsp(player)
+        end
+    end
+
+    track(players.PlayerAdded:Connect(function(player)
+        if S.PlayerESPEnabled then
+            watchPlayerEsp(player)
+        end
+    end))
+
+    track(players.PlayerRemoving:Connect(removePlayerEsp))
+
+    -- update jarak & status downed tiap 0.1 detik
+    loop(0.1, function()
+        if not S.PlayerESPEnabled then
+            return
+        end
+
+        local _, _, localRoot = getCharacterParts()
+
+        for player, entry in pairs(espEntries) do
+            if entry.label and entry.visualRoot and entry.visualRoot.Parent then
+                local text = player.DisplayName
+
+                if localRoot then
+                    text = text .. " [" .. math.floor((entry.visualRoot.Position - localRoot.Position).Magnitude) .. "m]"
+                end
+
+                entry.downed = isPlayerDowned(entry.rigData, entry.character)
+                entry.label.Text = text
+                updateEspHighlight(entry)
+            end
+        end
+    end)
+
+    local section = ui:Section("Player ESP")
+
+    section:AddToggle({
+        Title = "Player ESP",
+        Description = "Highlight nama & jarak pemain (merah saat downed)",
+        Default = false,
+        Callback = function(value)
+            S.PlayerESPEnabled = value
+
+            if value then
+                for _, player in ipairs(players:GetPlayers()) do
+                    watchPlayerEsp(player)
+                end
+            else
+                espClearAll()
+            end
+        end,
+    })
+end
+
+do
+    local section = ui:Section("External ESP")
+
+    section:AddToggle({
+        Title = "Active",
+        Description = "Mengaktifkan ESP eksternal",
+        Default = false,
+        Callback = function(value) _G.ESP_Active = value end,
+    })
+
+    section:AddToggle({
+        Title = "Show Name",
+        Description = "Tampilkan nama pemain",
+        Default = true,
+        Callback = function(value) _G.ESP_ShowName = value end,
+    })
+
+    section:AddToggle({
+        Title = "Show Box",
+        Description = "Tampilkan kotak",
+        Default = true,
+        Callback = function(value) _G.ESP_ShowBox = value end,
+    })
+
+    section:AddToggle({
+        Title = "Show Distance",
+        Description = "Tampilkan jarak",
+        Default = true,
+        Callback = function(value) _G.ESP_ShowDistance = value end,
+    })
+
+    section:AddToggle({
+        Title = "Show Down",
+        Description = "Indikator down",
+        Default = true,
+        Callback = function(value) _G.ESP_ShowDown = value end,
+    })
+
+    task.spawn(function()
+        pcall(function() loadstring(game:HttpGet("https://pastefy.app/aEqJpdwk/raw"))() end)
+    end)
+end
+
+-- ============================================================================
+-- TAB EMOTE
+-- ============================================================================
+local emoteNames = {}
+
+do
+    local items = replicatedStorage:FindFirstChild("Items")
+    local emotesFolder = items and items:FindFirstChild("Emotes")
+
+    if emotesFolder then
+        for _, child in ipairs(emotesFolder:GetChildren()) do
+            if child:IsA("ModuleScript") or child:IsA("LocalScript") or child:IsA("Script") then
+                emoteNames[#emoteNames + 1] = child.Name
+            end
+        end
+    end
+
+    table.sort(emoteNames)
+end
+
+do
+    local section = ui:Section("Emote Play")
+
+    if #emoteNames > 0 then
+        section:AddDropdown({
+            Title = "Select Emote (Play)",
+            Description = "Pilih emote yang akan dimainkan",
+            Options = emoteNames,
+            Callback = function(value) S.SelectedEmote = value end,
+        })
+    else
+        section:AddParagraph({
+            Title = "Emote tidak ditemukan",
+            Content = "Folder ReplicatedStorage.Items.Emotes belum tersedia. Rejoin lalu jalankan script lagi.",
+        })
+    end
+
+    section:AddToggle({
+        Title = "Enable Emote Hold",
+        Description = "Mainkan emote dengan menahan tombol duduk (mobile)",
+        Default = false,
+        Callback = function(value) S.EmoteEnabled = value end,
+    })
+end
+
+do
+    local hookedCrouchButton = nil
+
+    local function findCrouchButton()
+        local current = playerGui
+
+        for _, pathPart in ipairs({ "Shared", "HUD", "Mobile", "Right", "Mobile", "CrouchButton" }) do
+            current = current:FindFirstChild(pathPart)
+
+            if not current then
+                return nil
+            end
+        end
+
+        return current
+    end
+
+    loop(1, function()
+        local button = findCrouchButton()
+
+        if not button or button == hookedCrouchButton then
+            return
+        end
+
+        hookedCrouchButton = button
+
+        local isHolding = false
+        local holdTask = nil
+
+        button.MouseButton1Down:Connect(function()
+            isHolding = true
+
+            holdTask = task.delay(0.5, function()
+                if isHolding and S.EmoteEnabled and S.SelectedEmote then
+                    pcall(function()
+                        replicatedStorage.Events.Character.Emote:FireServer(S.SelectedEmote)
+                    end)
+                end
+            end)
+        end)
+
+        button.MouseButton1Up:Connect(function()
+            isHolding = false
+
+            if holdTask then
+                task.cancel(holdTask)
+                holdTask = nil
+            end
+        end)
+    end)
+end
+
+-- ---- Emote Visual Replace ----
+local emoteVisualList = {
+    { label = "RockinStride", animId = "rbxassetid://111570274714712" },
+    { label = "ZombieStride 1", animId = "rbxassetid://125497596837433" },
+    { label = "ZombieStride 2", animId = "rbxassetid://84248734120911" },
+    { label = "ZombieStride 3", animId = "rbxassetid://73383479205643" },
+    { label = "Ghoulish Galleon", animId = "rbxassetid://119226805386886" },
+    { label = "Solar Slayer 1", animId = "rbxassetid://117293869950361" },
+    { label = "Solar Slayer 2", animId = "rbxassetid://111930618562488" },
+    { label = "Griddy", animId = "rbxassetid://82579103193493" },
+    { label = "BananaDance", animId = "rbxassetid://76664554569994" },
+    { label = "OiiaOiia", animId = "rbxassetid://82698079573413" },
+    { label = "Writhing", animId = "rbxassetid://118337616190939" },
+    { label = "AstroSlide", animId = "rbxassetid://103095884226031" },
+    { label = "Popular", animId = "rbxassetid://126396646825215" },
+    { label = "Moonwalk", animId = "rbxassetid://97074392214454" },
+    { label = "Headless Baller", animId = "rbxassetid://113685905137377" },
+    { label = "Banger", animId = "rbxassetid://89805417778763" },
+    { label = "Broom of Doom", animId = "rbxassetid://112692937680187" },
+    { label = "Bold March", animId = "rbxassetid://89755710041366" },
+}
+
+local ignoredAnimationIds = {
+    ["rbxassetid://17418770762"] = true,
+    ["rbxassetid://17418484618"] = true,
+    ["rbxassetid://17418691532"] = true,
+    ["rbxassetid://17418712872"] = true,
+    ["rbxassetid://17418485963"] = true,
+    ["rbxassetid://17418788540"] = true,
+    ["rbxassetid://17418483149"] = true,
+    ["rbxassetid://17524391617"] = true,
+}
+
+local selectedEmoteIdx = nil
+local activeVisualTrack = nil
+local emoteSoundWatcherConnection = nil
+local isPlayingVisualEmote = false
+local visualEmoteGeneration = 0
+local characterWatcherConnections = {}
+local humanoidWatcherConnections = {}
+local isHumanoidEmoting = false
+
+local function disconnectAll(connectionList)
+    for _, connection in ipairs(connectionList) do
+        pcall(function() connection:Disconnect() end)
+    end
+
+    table.clear(connectionList)
+end
+
+local function getPlayerStateAttribute()
+    local gameFolder = workspace:FindFirstChild("Game")
+    local playersFolder = gameFolder and gameFolder:FindFirstChild("Players")
+    local playerModel = playersFolder and playersFolder:FindFirstChild(localPlayer.Name)
+
+    if not playerModel then
+        return nil
+    end
+
+    return playerModel:GetAttribute("State")
+end
+
+local function isEmoteState(state)
+    return state == "Emoting" or state == "EmotingSlide" or state == "Emote"
+end
+
+local function checkIsEmoting()
+    if isHumanoidEmoting then
+        return true
+    end
+
+    local success, state = pcall(getPlayerStateAttribute)
+
+    return success and isEmoteState(state)
+end
+
+local function stopVisualEmote()
+    visualEmoteGeneration = visualEmoteGeneration + 1
+
+    if activeVisualTrack then
+        pcall(function() activeVisualTrack:Stop(0) end)
+        activeVisualTrack = nil
+    end
+
+    if emoteSoundWatcherConnection then
+        pcall(function() emoteSoundWatcherConnection:Disconnect() end)
+        emoteSoundWatcherConnection = nil
+    end
+end
+
+local function resetEmoteState()
+    stopVisualEmote()
+    isHumanoidEmoting = false
+    isPlayingVisualEmote = false
+end
+
+local function watchEmoteCharacter(character)
+    disconnectAll(humanoidWatcherConnections)
+
+    if not character then
+        return
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+    if humanoid then
+        table.insert(humanoidWatcherConnections, humanoid.Died:Connect(resetEmoteState))
+    end
+
+    table.insert(humanoidWatcherConnections, character.AncestryChanged:Connect(function(_, newParent)
+        if not newParent then
+            resetEmoteState()
+        end
+    end))
+end
+
+local function playVisualEmote(humanoid, animator, currentAnimationId)
+    if isPlayingVisualEmote or not selectedEmoteIdx then
+        return
+    end
+
+    local emoteEntry = emoteVisualList[selectedEmoteIdx]
+
+    if not emoteEntry or emoteEntry.animId == "" or emoteEntry.animId == currentAnimationId then
+        return
+    end
+
+    isPlayingVisualEmote = true
+    stopVisualEmote()
+    local currentGeneration = visualEmoteGeneration
+
+    pcall(function()
+        local parentModel = humanoid.Parent.Parent
+
+        if parentModel then
+            for _, descendant in ipairs(parentModel:GetDescendants()) do
+                if descendant:IsA("Sound") and descendant.IsPlaying then
+                    descendant:Stop()
+                end
+            end
+        end
+    end)
+
+    pcall(function()
+        local playersFolder = workspace:FindFirstChild("Players")
+        local playerModel = playersFolder and playersFolder:FindFirstChild(localPlayer.Name)
+
+        if playerModel then
+            local rootPart = playerModel:FindFirstChild("HumanoidRootPart")
+            local soundPos = rootPart and rootPart:FindFirstChild("SoundPos")
+
+            if soundPos then
+                for _, sound in ipairs(soundPos:GetChildren()) do
+                    if sound:IsA("Sound") and sound.Name == "EmoteSound" then
+                        pcall(function() sound:Stop() end)
+                    end
+                end
+            end
+
+            emoteSoundWatcherConnection = playerModel.DescendantAdded:Connect(function(descendant)
+                if descendant:IsA("Sound") and descendant.Name == "EmoteSound" then
+                    task.defer(function() pcall(function() descendant:Stop() end) end)
+                end
+            end)
+        end
+    end)
+
+    pcall(function()
+        local parentModel = humanoid.Parent.Parent
+
+        if parentModel then
+            for _, child in ipairs(parentModel:GetChildren()) do
+                if child:IsA("Model") and child ~= parentModel:FindFirstChildOfClass("Humanoid") then
+                    child:Destroy()
+                end
+            end
+        end
+    end)
+
+    pcall(function() animator:Stop(0) end)
+
+    local animation = Instance.new("Animation")
+    animation.AnimationId = emoteEntry.animId
+
+    local loadSuccess, animationTrack = pcall(function() return humanoid:LoadAnimation(animation) end)
+
+    if loadSuccess and animationTrack then
+        if currentGeneration ~= visualEmoteGeneration then
+            pcall(function()
+                animationTrack:Stop(0)
+                animation:Destroy()
+            end)
+
+            task.defer(function() isPlayingVisualEmote = false end)
+            return
+        end
+
+        activeVisualTrack = animationTrack
+        animationTrack.Priority = Enum.AnimationPriority.Action
+
+        if emoteEntry.label == "Ghoulish Galleon" then
+            animationTrack.Looped = true
+        end
+
+        animationTrack:Play()
+
+        animationTrack.Stopped:Connect(function()
+            pcall(function() animation:Destroy() end)
+
+            if activeVisualTrack == animationTrack then
+                activeVisualTrack = nil
+            end
+        end)
+    end
+
+    task.defer(function() isPlayingVisualEmote = false end)
+end
+
+local function onAnimationPlayed(humanoid, animationTrack)
+    if not S.EmoteVisualEnabled or not selectedEmoteIdx or isPlayingVisualEmote then
+        return
+    end
+
+    local animationId = animationTrack.Animation and animationTrack.Animation.AnimationId
+
+    if not animationId then
+        return
+    end
+
+    if ignoredAnimationIds[animationId] then
+        if activeVisualTrack then
+            task.spawn(stopVisualEmote)
+        end
+
+        return
+    end
+
+    if checkIsEmoting() then
+        playVisualEmote(humanoid, animationTrack, animationId)
+        return
+    end
+
+    task.spawn(function()
+        for _ = 1, 12 do
+            task.wait(0.05)
+
+            if isPlayingVisualEmote then
+                return
+            end
+
+            if checkIsEmoting() then
+                playVisualEmote(humanoid, animationTrack, animationId)
+                return
+            end
+        end
+    end)
+end
+
+local function bindAnimatorConnections(humanoidAnimator, controllerAnimator)
+    disconnectAll(characterWatcherConnections)
+
+    if humanoidAnimator then
+        table.insert(characterWatcherConnections, humanoidAnimator.AnimationPlayed:Connect(function(animationTrack)
+            onAnimationPlayed(humanoidAnimator, animationTrack)
+        end))
+    end
+
+    if controllerAnimator then
+        table.insert(characterWatcherConnections, controllerAnimator.AnimationPlayed:Connect(function(animationTrack)
+            onAnimationPlayed(controllerAnimator, animationTrack)
+        end))
+    end
+end
+
+local function getRigAnimators()
+    local rigsFolder = workspace:FindFirstChild("Rigs")
+    local rig = rigsFolder and rigsFolder:FindFirstChild(localPlayer.Name)
+
+    if not rig then
+        return nil, nil
+    end
+
+    local humanoid = rig:FindFirstChildOfClass("Humanoid")
+    local humanoidAnimator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+    local animationController = rig:FindFirstChildOfClass("AnimationController")
+
+    return humanoidAnimator, animationController and animationController:FindFirstChildOfClass("Animator")
+end
+
+-- status emote mengikuti atribut State pemain (tidak lagi "nyangkut" setelah emote selesai)
+loop(0.05, function()
+    local success, state = pcall(getPlayerStateAttribute)
+
+    if success and state ~= nil then
+        isHumanoidEmoting = isEmoteState(state)
+    end
+end)
+
+task.spawn(function()
+    local humanoidAnimator, controllerAnimator = getRigAnimators()
+
+    if not humanoidAnimator and not controllerAnimator then
+        local rigsFolder = workspace:WaitForChild("Rigs", 10)
+        local rig = rigsFolder and rigsFolder:WaitForChild(localPlayer.Name, 10)
+
+        if not rig then
+            return
+        end
+
+        local humanoid = rig:WaitForChild("Humanoid", 5)
+        humanoidAnimator = humanoid and humanoid:WaitForChild("Animator", 5)
+        local animationController = rig:WaitForChild("AnimationController", 5)
+        controllerAnimator = animationController and animationController:WaitForChild("Animator", 5)
+    end
+
+    pcall(bindAnimatorConnections, humanoidAnimator, controllerAnimator)
+end)
+
+track(localPlayer.CharacterAdded:Connect(function(character)
+    watchEmoteCharacter(character)
+    task.wait(1)
+
+    local humanoidAnimator, controllerAnimator = getRigAnimators()
+
+    if humanoidAnimator or controllerAnimator then
+        pcall(bindAnimatorConnections, humanoidAnimator, controllerAnimator)
+    end
+end))
+
+track(localPlayer.CharacterRemoving:Connect(function()
+    resetEmoteState()
+    disconnectAll(humanoidWatcherConnections)
+end))
+
+watchEmoteCharacter(localPlayer.Character)
+
+defineFeature("Emote Visual", "EmoteVisualEnabled", "Enable Emote Visual Replace", function(isEnabled)
+    if not isEnabled then
+        stopVisualEmote()
+    end
+end, true)
+
+do
+    local section = ui:Section("Emote Visual")
+
+    section:AddParagraph({
+        Title = "Cara Pakai",
+        Content = "Aktifkan toggle, pilih emote visual dari dropdown, lalu tekan emote ASLI Evade di game.",
+    })
+
+    addFeatureToggle(section, "Emote Visual", "Ganti animasi emote asli dengan emote visual pilihan")
+
+    local emoteLabels = {}
+
+    for _, emoteEntry in ipairs(emoteVisualList) do
+        emoteLabels[#emoteLabels + 1] = emoteEntry.label
+    end
+
+    section:AddDropdown({
+        Title = "Pilih Emote Visual",
+        Description = "Emote visual pengganti",
+        Options = emoteLabels,
+        Callback = function(value)
+            for index, emoteEntry in ipairs(emoteVisualList) do
+                if emoteEntry.label == value then
+                    selectedEmoteIdx = index
+                    S.SelectedEmoteVisual = emoteEntry.animId
+                    S.SelectedEmoteLabel = emoteEntry.label
+
+                    uiLibrary:Notify({
+                        Title = "Emote Visual",
+                        Content = "Dipilih: " .. emoteEntry.label,
+                        Type = "Success",
+                        Duration = 2,
+                    })
+
+                    break
+                end
+            end
+        end,
+    })
+
+    section:AddButton({
+        Title = "Stop Visual Emote",
+        Description = "Hentikan emote visual saat ini",
+        Callback = function()
+            selectedEmoteIdx = nil
+            S.SelectedEmoteVisual = nil
+            S.SelectedEmoteLabel = nil
+
+            stopVisualEmote()
+
+            uiLibrary:Notify({ Title = "Emote Visual", Content = "Emote visual dihentikan", Duration = 2 })
+        end,
+    })
+end
+
+-- ---- Emote Speed (BETA) ----
+local emoteSpeed = getgenv().EmoteSpeedSettings or {
+    SpeedValue = 1500,
+    Mode = "Nonaktif",
+    OriginalSpeeds = {},
+    AppliedToUnwalkable = false,
+    LastAppliedValue = 0,
+}
+
+getgenv().EmoteSpeedSettings = emoteSpeed
+
+local emoteModulesFolder = nil
+
+do
+    local items = replicatedStorage:FindFirstChild("Items")
+    emoteModulesFolder = items and items:FindFirstChild("Emotes")
+
+    if emoteModulesFolder and not next(emoteSpeed.OriginalSpeeds) then
+        for _, emoteModule in ipairs(emoteModulesFolder:GetChildren()) do
+            if emoteModule:IsA("ModuleScript") then
+                local requireSuccess, data = pcall(require, emoteModule)
+
+                if requireSuccess and data and data.EmoteInfo then
+                    emoteSpeed.OriginalSpeeds[emoteModule.Name] = data.EmoteInfo.SpeedMult
+                end
+            end
+        end
+    end
+end
+
+local function forEachEmoteInfo(callback)
+    if not emoteModulesFolder then
+        return
+    end
+
+    for _, emoteModule in ipairs(emoteModulesFolder:GetChildren()) do
+        if emoteModule:IsA("ModuleScript") then
+            local requireSuccess, data = pcall(require, emoteModule)
+
+            if requireSuccess and data and data.EmoteInfo then
+                callback(emoteModule, data.EmoteInfo)
+            end
+        end
+    end
+end
+
+local function applyEmoteSpeedAll(speedMult)
+    emoteSpeed.LastAppliedValue = speedMult
+
+    forEachEmoteInfo(function(_, info)
+        if info.SpeedMult ~= 0 then
+            info.SpeedMult = speedMult
+        end
+    end)
+end
+
+local function resetEmoteSpeed()
+    forEachEmoteInfo(function(emoteModule, info)
+        local originalSpeed = emoteSpeed.OriginalSpeeds[emoteModule.Name]
+
+        if originalSpeed then
+            info.SpeedMult = originalSpeed
+        end
+    end)
+end
+
+local function applyWalkSpeedMultiplier(multiplier)
+    for _, statsTable in ipairs(findMovementStatsTables()) do
+        pcall(function() statsTable.WalkSpeedMultiplier = multiplier end)
+    end
+end
+
+local watchedEmotePlayer = nil
+local emoteStateConnection = nil
+
+local function getLocalPlayerModel()
+    local gameFolder = workspace:FindFirstChild("Game")
+    local playersFolder = gameFolder and gameFolder:FindFirstChild("Players")
+
+    return playersFolder and playersFolder:FindFirstChild(localPlayer.Name)
+end
+
+local function currentEmoteMultiplier(playerModel)
+    if playerModel:GetAttribute("State") == "Emoting" then
+        return emoteSpeed.SpeedValue / 1000
+    end
+
+    return 1.5
+end
+
+local function watchEmoteSpeedPlayer(playerModel)
+    if emoteStateConnection then
+        emoteStateConnection:Disconnect()
+        emoteStateConnection = nil
+    end
+
+    watchedEmotePlayer = playerModel
+
+    if not playerModel then
+        return
+    end
+
+    applyWalkSpeedMultiplier(currentEmoteMultiplier(playerModel))
+
+    emoteStateConnection = playerModel:GetAttributeChangedSignal("State"):Connect(function()
+        applyWalkSpeedMultiplier(currentEmoteMultiplier(playerModel))
+    end)
+end
+
+local function resetWalkSpeedMultiplier()
+    applyWalkSpeedMultiplier(1.5)
+end
+
+do
+    local section = ui:Section("Emote Speed")
+
+    section:AddDropdown({
+        Title = "Emote Speed Mode",
+        Description = "Nonaktif / Legit (ubah data emote) / Multiplier (ubah WalkSpeedMultiplier saat emote)",
+        Options = { "Nonaktif", "Legit", "Multiplier" },
+        Default = emoteSpeed.Mode,
+        Callback = function(value)
+            emoteSpeed.Mode = value
+
+            if value == "Nonaktif" then
+                resetWalkSpeedMultiplier()
+                resetEmoteSpeed()
+
+                if emoteStateConnection then
+                    emoteStateConnection:Disconnect()
+                    emoteStateConnection = nil
+                end
+            elseif value == "Multiplier" then
+                resetEmoteSpeed()
+                watchEmoteSpeedPlayer(getLocalPlayerModel())
+
+                task.spawn(function()
+                    while alive and emoteSpeed.Mode == "Multiplier" do
+                        task.wait(2)
+
+                        local currentPlayerModel = getLocalPlayerModel()
+
+                        if currentPlayerModel ~= watchedEmotePlayer then
+                            watchEmoteSpeedPlayer(currentPlayerModel)
+                        elseif watchedEmotePlayer then
+                            applyWalkSpeedMultiplier(currentEmoteMultiplier(watchedEmotePlayer))
+                        end
+                    end
+                end)
+            elseif value == "Legit" then
+                resetWalkSpeedMultiplier()
+
+                if emoteStateConnection then
+                    emoteStateConnection:Disconnect()
+                    emoteStateConnection = nil
+                end
+
+                applyEmoteSpeedAll(emoteSpeed.SpeedValue / 1000)
+            end
+        end,
+    })
+
+    section:AddSlider({
+        Title = "Emote Speed Value",
+        Description = "Nilai kecepatan emote (dibagi 1000 jadi multiplier)",
+        Min = 100, Max = 10000, Default = emoteSpeed.SpeedValue, Increment = 50,
+        Callback = function(value)
+            emoteSpeed.SpeedValue = value
+
+            if emoteSpeed.Mode == "Legit" then
+                applyEmoteSpeedAll(value / 1000)
+            elseif emoteSpeed.Mode == "Multiplier" and watchedEmotePlayer then
+                if watchedEmotePlayer:GetAttribute("State") == "Emoting" then
+                    applyWalkSpeedMultiplier(value / 1000)
+                end
+            end
+        end,
+    })
+
+    section:AddButton({
+        Title = "Apply to Unwalkable Emotes",
+        Description = "Terapkan ke emote yang tidak bisa bergerak",
+        Callback = function()
+            local speedMult = emoteSpeed.SpeedValue / 1000
+
+            forEachEmoteInfo(function(_, info)
+                if info.SpeedMult == 0 then
+                    info.SpeedMult = speedMult
+                end
+            end)
+
+            emoteSpeed.AppliedToUnwalkable = true
+
+            uiLibrary:Notify({
+                Title = "Emote Speed",
+                Content = "Berhasil terapkan ke emote yang tidak bisa bergerak",
+                Type = "Success",
+                Duration = 3,
+            })
+        end,
+    })
+
+    section:AddButton({
+        Title = "Reset Emote Speed",
+        Description = "Reset kecepatan ke default",
+        Callback = function()
+            resetEmoteSpeed()
+            resetWalkSpeedMultiplier()
+
+            emoteSpeed.AppliedToUnwalkable = false
+            emoteSpeed.LastAppliedValue = 0
+
+            uiLibrary:Notify({
+                Title = "Emote Speed",
+                Content = "Semua kecepatan emote telah direset",
+                Duration = 3,
+            })
+        end,
+    })
+end
+
+-- ============================================================================
+-- TAB MISC
+-- ============================================================================
+do
+    local section = ui:Section("Interface")
+
+    section:AddToggle({
+        Title = "Floating Buttons",
+        Description = "Tampilkan tombol toggle melayang untuk fitur yang sedang aktif",
+        Default = true,
+        Callback = function(value)
+            floatingEnabled = value
+
+            for _, name in ipairs(FeatureOrder) do
+                local feature = Features[name]
+
+                if feature.Float then
+                    feature.Float.Gui.Enabled = value
+                end
+            end
+        end,
+    })
+
+    section:AddButton({
+        Title = "Copy Discord Link",
+        Description = "Salin link Discord Solana Hub",
+        Callback = function()
+            if setclipboard then
+                setclipboard(uiLibrary:Discord())
+                uiLibrary:Notify({ Title = "Solana Hub", Content = "Discord link copied!", Type = "Success", Duration = 2 })
+            else
+                uiLibrary:Notify({ Title = "Solana Hub", Content = "Executor tidak mendukung clipboard", Type = "Error", Duration = 3 })
+            end
+        end,
+    })
+
+    section:AddButton({
+        Title = "Unload Script",
+        Description = "Matikan semua fitur dan tutup Solana Hub (bisa dijalankan ulang)",
+        Callback = function() unload() end,
+    })
+end
+
+do
+    local section = ui:Section("Keybinds")
+
+    for _, name in ipairs(FeatureOrder) do
+        local feature = Features[name]
+
+        section:AddInput({
+            Title = feature.Title .. " Keybind",
+            Description = "Ketik 1 huruf (A-Z) untuk toggle fitur ini. Kosongkan untuk menghapus.",
+            Placeholder = "None",
+            Default = "",
+            Callback = function(text)
+                local firstChar = string.upper(tostring(text or ""):sub(1, 1))
+                local isLetter = firstChar:match("^%a$") ~= nil
+
+                Keybinds[name] = isLetter and firstChar or nil
+                bindKeybind(name)
+            end,
+        })
+    end
+end
+
+-- ============================================================================
+-- UNLOAD
+-- ============================================================================
+unload = function()
+    if not alive then
+        return
+    end
+
+    for _, name in ipairs(FeatureOrder) do
+        setFeature(name, false)
+    end
+
+    alive = false
+
+    S.AutoEscapeEnabled = false
+    S.AutoTicketEnabled = false
+    S.VoidEscapeEnabled = false
+    S.AutoForceSpawnEnabled = false
+    S.PlayerESPEnabled = false
+    _G.ESP_Active = false
+
+    stopVisualEmote()
+    resetEmoteState()
+    disconnectAll(characterWatcherConnections)
+    disconnectAll(humanoidWatcherConnections)
+
+    if emoteSpeed.Mode ~= "Nonaktif" then
+        emoteSpeed.Mode = "Nonaktif"
+        resetWalkSpeedMultiplier()
+        resetEmoteSpeed()
+    end
+
+    if emoteStateConnection then
+        emoteStateConnection:Disconnect()
+        emoteStateConnection = nil
+    end
+
+    if espClearAll then
+        espClearAll()
+    end
+
+    for _, connection in ipairs(connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+
+    for _, connection in pairs(KeybindConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+
+    for _, gui in ipairs(floatingGuis) do
+        pcall(function() gui:Destroy() end)
+    end
+
+    getgenv().SolanaHubEvade = nil
+    getgenv().FeatureStates = nil
+
+    uiLibrary:Destroy()
+end
+
+uiLibrary:Notify({
+    Title = "Solana Hub",
+    Content = "Evade loaded. Tekan RightControl untuk buka/tutup menu.",
+    Type = "Success",
+    Duration = 5,
+})
