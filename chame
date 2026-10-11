@@ -1,0 +1,986 @@
+local players = game:GetService("Players")
+local runService = game:GetService("RunService")
+local userInputService = game:GetService("UserInputService")
+
+if getgenv().SolanaHubChameleon then
+    warn("[Solana Hub] Script sudah berjalan. Rejoin untuk memuat ulang.")
+    return
+end
+
+getgenv().SolanaHubChameleon = true
+
+local localPlayer = players.LocalPlayer
+local alive = true
+local connections = {}
+local drawings = {}
+
+local function track(connection)
+    table.insert(connections, connection)
+    return connection
+end
+
+-- ============================================================================
+-- STATE
+-- ============================================================================
+local S = {
+    AimbotV1 = false,
+    AimbotV2 = false,
+    AimbotMode = "Hold to Lock",
+    AimbotSmooth = 0.25,
+    AimRadius = 100,
+    ShowFov = false,
+    TeamCheck = true,
+    Crosshair = false,
+    CrosshairStyle = "Dot",
+    CrosshairSize = 28,
+    ESP = false,
+    Tracer = false,
+    WalkSpeedOn = false,
+    WalkSpeed = 16,
+    Noclip = false,
+}
+
+-- ============================================================================
+-- SOLANA HUB UI (ModernV2) - sama seperti Solana Hub Evade
+-- ============================================================================
+local MODERN_THEME = {
+    Title = "Solana Hub",
+    Content = "Chameleon | V 1.0",
+    Logo = "rbxassetid://135199868370962",
+    Color = Color3.fromRGB(220, 35, 55),
+    Discord = "https://discord.gg/solanahub",
+}
+
+local MODERN_URL = "https://raw.githubusercontent.com/SolanaHubmy/ggsolana/refs/heads/main/SolanaHub-ModernV2.txt"
+
+local function patchLibrarySource(source)
+    if type(source) ~= "string" then
+        return source
+    end
+
+    local needle = "local ContentSize = TextService:GetTextSize(ContentLabel.Text,ContentLabel.TextSize,ContentLabel.Font,Vector2.new(Width,math.huge));"
+
+    local replacement = [[local PlainText = ContentLabel.Text
+		if ContentLabel.RichText then
+			PlainText = PlainText:gsub("<[^>]*>", ""):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&amp;", "&")
+		end
+		local ContentSize = TextService:GetTextSize(PlainText,ContentLabel.TextSize,ContentLabel.Font,Vector2.new(math.max(60, Width - 12),math.huge));]]
+
+    local startIndex, endIndex = string.find(source, needle, 1, true)
+
+    if not startIndex then
+        return source
+    end
+
+    return string.sub(source, 1, startIndex - 1) .. replacement .. string.sub(source, endIndex + 1)
+end
+
+local modern
+
+for attempt = 1, 3 do
+    local ok, lib = pcall(function()
+        local chunk, compileError = loadstring(patchLibrarySource(game:HttpGet(MODERN_URL)))
+
+        if not chunk then
+            error(compileError)
+        end
+
+        return chunk()
+    end)
+
+    if ok and type(lib) == "table" then
+        modern = lib
+        break
+    end
+
+    warn("[Solana Hub] Gagal memuat ModernV2 (percobaan " .. attempt .. "): " .. tostring(lib))
+    task.wait(1)
+end
+
+if not modern then
+    getgenv().SolanaHubChameleon = nil
+    error("ModernV2 gagal dimuat (network issue). Rejoin lalu jalankan script lagi.")
+end
+
+pcall(function() modern.GlobalLogo = MODERN_THEME.Logo end)
+
+local function iconOf(name)
+    name = tostring(name or "layers")
+
+    if name:find(":") then
+        return name
+    end
+
+    return "lucide:" .. name
+end
+
+local function callHost(host, method, cfg)
+    local fn = host and host[method]
+
+    if type(fn) ~= "function" then
+        return nil
+    end
+
+    local ok, result = pcall(fn, host, cfg)
+
+    if not ok then
+        warn("[Solana Hub] " .. method .. " gagal: " .. tostring(result))
+        return nil
+    end
+
+    return result
+end
+
+local flagCounts = {}
+
+local function makeFlag(prefix, scope, title)
+    local base = prefix .. ":" .. tostring(scope) .. "/" .. title
+    flagCounts[base] = (flagCounts[base] or 0) + 1
+
+    if flagCounts[base] > 1 then
+        base = base .. "#" .. flagCounts[base]
+    end
+
+    return base
+end
+
+local window = modern.Window and modern:Window({
+    Title = MODERN_THEME.Title,
+    Content = MODERN_THEME.Content,
+    Logo = MODERN_THEME.Logo,
+    Image = MODERN_THEME.Logo,
+    Uitransparent = 0.15,
+    Size = UDim2.fromOffset(500, 320),
+    Color = MODERN_THEME.Color,
+    ShowUser = true,
+    Search = true,
+    ConfigEnabled = true,
+    NotifyOnCallbackError = false,
+    Loadingscreen = false,
+    Enable3DRenderer = false,
+    Keybind = "RightControl",
+    Config = {
+        ConfigFolder = "SolanaHubChameleon",
+        AutoSaveFile = "SolanaHub_Chameleon",
+        AutoSave = false,
+        AutoLoad = false,
+        Overwrite = true,
+        Format = "JSON",
+        ShowAutoSaveToggle = true,
+        TextGradient = true,
+    },
+}) or (modern.CreateWindow and modern:CreateWindow({
+    Title = MODERN_THEME.Title,
+    Content = MODERN_THEME.Content,
+    Logo = MODERN_THEME.Logo,
+    Image = MODERN_THEME.Logo,
+    Uitransparent = 0.15,
+    Size = UDim2.fromOffset(500, 320),
+    Color = MODERN_THEME.Color,
+    ShowUser = true,
+    Search = true,
+    ConfigEnabled = true,
+    NotifyOnCallbackError = false,
+    Loadingscreen = false,
+    Enable3DRenderer = false,
+    Keybind = "RightControl",
+}))
+
+assert(window, "ModernV2 gagal membuat window.")
+
+-- Menu icon, Dashboard, dan info akun seperti Solana Hub Evade
+do
+    local menuIcon
+
+    if type(modern.CreateMenuIcon) == "function" then
+        local didIcon, icon = pcall(function()
+            return modern:CreateMenuIcon({
+                Image = MODERN_THEME.Logo,
+                Size = 48,
+                IconColor = Color3.fromRGB(255, 255, 255),
+                BGColor = Color3.fromRGB(20, 22, 27),
+                StrokeColor = MODERN_THEME.Color,
+                StrokeThick = 1.5,
+                Draggable = true,
+            })
+        end)
+
+        if didIcon then
+            menuIcon = icon
+        end
+    end
+
+    if menuIcon and type(window.AttachMenuIcon) == "function" then
+        pcall(window.AttachMenuIcon, window, menuIcon)
+    end
+
+    if type(window.CreateHomeTab) == "function" then
+        local didHome, homeError = pcall(function()
+            window:CreateHomeTab({
+                Name = "Dashboard",
+                Icon = "lucide:layout-dashboard",
+                Content = "Solana Hub - Chameleon",
+                DiscordInvite = MODERN_THEME.Discord,
+                SupportedExecutors = { "Delta", "Synapse X", "Krnl", "Codex", "Arceus X" },
+                UnsupportedExecutors = { "Roblox Studio" },
+                Segments = {
+                    Details = { Text = "Details", Icon = "lucide:grid-2x2" },
+                    Script = { Text = "Script Logs", Icon = "lucide:code" },
+                    UI = { Text = "UI Logs", Icon = "lucide:file-text", Show = true },
+                },
+                Changelog = {
+                    {
+                        Title = "Solana Hub Chameleon v1.0",
+                        Description = "Aimbot V1/V2, Crosshair, ESP Player, Tracer, WalkSpeed, dan Noclip.",
+                    },
+                },
+                UIChangelog = {
+                    {
+                        Title = "ModernV2 Framework",
+                        Date = "Latest",
+                        Description = "Chameleon interface aligned with the Solana Hub Evade design.",
+                    },
+                },
+            })
+        end)
+
+        if not didHome then
+            warn("[Solana Hub] Gagal membuat Dashboard: " .. tostring(homeError))
+        end
+    end
+
+    if type(window.ToggleInterface) == "function" then
+        local originalToggle = window.ToggleInterface
+
+        window.ToggleInterface = function(self, ...)
+            if window.Destroyed then
+                return
+            end
+
+            local isOpen = window.Signal and window.Signal:GetValue()
+
+            if not isOpen then
+                pcall(function()
+                    if window.Root and modern.ScreenGui then
+                        window.Root.Parent = modern.ScreenGui
+                        window.Root.Visible = true
+                    end
+                end)
+            end
+
+            return originalToggle(self, ...)
+        end
+    end
+
+    pcall(function()
+        if type(window.SetAccount) == "function" then
+            window:SetAccount({
+                Username = localPlayer.DisplayName,
+                Profile = modern.UserProfile,
+                Expires = MODERN_THEME.Title,
+            })
+        end
+    end)
+end
+
+-- ============================================================================
+-- BUILDER: tab per kategori, sub-tab per grup (seperti Evade)
+-- ============================================================================
+local function makeControls(host, scope)
+    local api = {}
+
+    function api:Toggle(key, text, default, callback)
+        S[key] = default == true
+
+        callHost(host, "AddToggle", {
+            Name = text,
+            Default = S[key],
+            Flag = makeFlag("T", scope, text),
+            Callback = function(value)
+                S[key] = value == true
+
+                if callback then
+                    pcall(callback, S[key])
+                end
+            end,
+        })
+    end
+
+    function api:Slider(key, text, min, max, default, step, decimals, callback)
+        S[key] = default
+
+        callHost(host, "AddSlider", {
+            Name = text,
+            Min = min,
+            Max = max,
+            Default = default,
+            Increment = step,
+            Rounding = decimals,
+            Flag = makeFlag("S", scope, text),
+            Callback = function(value)
+                S[key] = value
+
+                if callback then
+                    pcall(callback, value)
+                end
+            end,
+        })
+    end
+
+    function api:Dropdown(key, text, values, default, callback)
+        S[key] = default
+
+        callHost(host, "AddDropdown", {
+            Name = text,
+            Values = values,
+            Default = default,
+            Multi = false,
+            Search = #values > 8,
+            AllowNone = false,
+            Flag = makeFlag("D", scope, text),
+            Callback = function(value)
+                if type(value) == "table" then
+                    value = value[1]
+                end
+
+                S[key] = value
+
+                if callback then
+                    pcall(callback, value)
+                end
+            end,
+        })
+    end
+
+    function api:Button(text, fn)
+        callHost(host, "AddButton", {
+            Name = text,
+            Callback = function()
+                task.spawn(pcall, fn)
+            end,
+        })
+    end
+
+    return api
+end
+
+local function newTab(name, icon)
+    local tab = window:AddTab({ Name = name, Icon = iconOf(icon), Type = "Single" })
+
+    if not tab then
+        error("Gagal membuat tab: " .. tostring(name))
+    end
+
+    local obj = { Name = name, Raw = tab, Box = nil }
+
+    function obj:Group(title, groupIcon)
+        if not self.Box then
+            local okBox, box = pcall(function()
+                return self.Raw:AddCenterTabbox(self.Name)
+            end)
+
+            if okBox and box then
+                self.Box = box
+            end
+        end
+
+        local host = self.Raw
+
+        if self.Box then
+            local okSub, sub = pcall(function()
+                return self.Box:AddTab({ Name = title, Icon = iconOf(groupIcon) })
+            end)
+
+            if okSub and sub then
+                host = sub
+            end
+        end
+
+        callHost(host, "AddDivider", { Text = title })
+
+        return makeControls(host, title)
+    end
+
+    return obj
+end
+
+-- ============================================================================
+-- COMBAT
+-- ============================================================================
+local combatTab = newTab("Combat", "crosshair")
+
+local aimGroup = combatTab:Group("Aimbot", "crosshair")
+aimGroup:Toggle("AimbotV1", "Aimbot V1 (Snap)", false)
+aimGroup:Toggle("AimbotV2", "Aimbot V2 (Smooth)", false)
+aimGroup:Dropdown("AimbotMode", "Trigger Mode", { "Hold to Lock", "Auto Lock (Always)" }, "Hold to Lock")
+aimGroup:Slider("AimbotSmooth", "Smoothness", 0.05, 1, 0.25, 0.05, 2)
+aimGroup:Toggle("TeamCheck", "Team Check", true)
+
+local fovGroup = combatTab:Group("FOV", "target")
+fovGroup:Slider("AimRadius", "Aim Radius (FOV)", 10, 500, 100, 5, 0)
+fovGroup:Toggle("ShowFov", "Show FOV Circle", false)
+
+local crosshairGroup = combatTab:Group("Crosshair", "plus")
+crosshairGroup:Toggle("Crosshair", "Enable Crosshair", false)
+crosshairGroup:Dropdown("CrosshairStyle", "Crosshair Style", { "Dot", "Circle", "Plus", "Cross", "Scope" }, "Dot")
+crosshairGroup:Slider("CrosshairSize", "Crosshair Size", 10, 100, 28, 1, 0)
+
+-- ============================================================================
+-- VISUAL
+-- ============================================================================
+local visualTab = newTab("Visual", "eye")
+
+local espGroup = visualTab:Group("ESP", "scan-eye")
+espGroup:Toggle("ESP", "ESP Player", false)
+
+local tracerGroup = visualTab:Group("Tracer", "move-up")
+tracerGroup:Toggle("Tracer", "Tracer Line", false)
+
+-- ============================================================================
+-- PLAYER
+-- ============================================================================
+local playerTab = newTab("Player", "user")
+
+local characterGroup = playerTab:Group("Character", "footprints")
+characterGroup:Toggle("WalkSpeedOn", "WalkSpeed Override", false)
+characterGroup:Slider("WalkSpeed", "WalkSpeed", 16, 100, 16, 1, 0)
+characterGroup:Toggle("Noclip", "Noclip", false)
+
+-- ============================================================================
+-- HELPER
+-- ============================================================================
+local function getCharacterHumanoid()
+    local character = localPlayer.Character
+    return character and character:FindFirstChildOfClass("Humanoid"), character
+end
+
+local function isEnemy(player)
+    if player == localPlayer then
+        return false
+    end
+
+    if S.TeamCheck and player.Team and localPlayer.Team and player.Team == localPlayer.Team then
+        return false
+    end
+
+    return true
+end
+
+local function getAliveHead(player)
+    local character = player.Character
+
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+    if not humanoid or humanoid.Health <= 0 then
+        return nil
+    end
+
+    return character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
+end
+
+local function newDrawing(kind)
+    if not Drawing then
+        return nil
+    end
+
+    local ok, obj = pcall(Drawing.new, kind)
+
+    if ok and obj then
+        table.insert(drawings, obj)
+        return obj
+    end
+
+    return nil
+end
+
+-- ============================================================================
+-- AIMBOT
+-- ============================================================================
+local function findAimTarget()
+    local camera = workspace.CurrentCamera
+    local center = camera.ViewportSize / 2
+    local bestPart, bestDistance = nil, S.AimRadius
+
+    for _, player in ipairs(players:GetPlayers()) do
+        if isEnemy(player) then
+            local part = getAliveHead(player)
+
+            if part then
+                local screenPos, onScreen = camera:WorldToViewportPoint(part.Position)
+
+                if onScreen and screenPos.Z > 0 then
+                    local distance = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+
+                    if distance < bestDistance then
+                        bestDistance = distance
+                        bestPart = part
+                    end
+                end
+            end
+        end
+    end
+
+    return bestPart
+end
+
+local function isAimTriggerActive()
+    if S.AimbotMode == "Auto Lock (Always)" then
+        return true
+    end
+
+    return userInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        or userInputService:IsKeyDown(Enum.KeyCode.E)
+end
+
+track(runService.RenderStepped:Connect(function()
+    if not alive or not (S.AimbotV1 or S.AimbotV2) then
+        return
+    end
+
+    if not isAimTriggerActive() then
+        return
+    end
+
+    local part = findAimTarget()
+
+    if not part then
+        return
+    end
+
+    local camera = workspace.CurrentCamera
+    local goal = CFrame.new(camera.CFrame.Position, part.Position)
+
+    if S.AimbotV1 then
+        camera.CFrame = goal
+    else
+        camera.CFrame = camera.CFrame:Lerp(goal, S.AimbotSmooth)
+    end
+end))
+
+-- FOV circle
+local fovCircle = newDrawing("Circle")
+
+if fovCircle then
+    fovCircle.NumSides = 64
+    fovCircle.Thickness = 1
+    fovCircle.Filled = false
+    fovCircle.Color = Color3.fromRGB(255, 255, 255)
+    fovCircle.Visible = false
+end
+
+-- ============================================================================
+-- CROSSHAIR
+-- ============================================================================
+local crossLines = {}
+
+for i = 1, 4 do
+    local line = newDrawing("Line")
+
+    if line then
+        line.Thickness = 2
+        line.Color = Color3.fromRGB(255, 255, 255)
+        line.Visible = false
+    end
+
+    crossLines[i] = line
+end
+
+local crossDot = newDrawing("Circle")
+local crossRing = newDrawing("Circle")
+
+if crossDot then
+    crossDot.Filled = true
+    crossDot.Color = Color3.fromRGB(255, 255, 255)
+    crossDot.Visible = false
+end
+
+if crossRing then
+    crossRing.Filled = false
+    crossRing.Thickness = 2
+    crossRing.NumSides = 48
+    crossRing.Color = Color3.fromRGB(255, 255, 255)
+    crossRing.Visible = false
+end
+
+local function hideCrosshair()
+    for _, line in ipairs(crossLines) do
+        if line then
+            line.Visible = false
+        end
+    end
+
+    if crossDot then
+        crossDot.Visible = false
+    end
+
+    if crossRing then
+        crossRing.Visible = false
+    end
+end
+
+local function drawCrosshair(center)
+    local size = S.CrosshairSize
+    local style = S.CrosshairStyle
+    local half = size / 2
+    local gap = 4
+
+    local function setLine(index, fromPoint, toPoint)
+        local line = crossLines[index]
+
+        if line then
+            line.From = fromPoint
+            line.To = toPoint
+            line.Visible = true
+        end
+    end
+
+    local function hideLines()
+        for _, line in ipairs(crossLines) do
+            if line then
+                line.Visible = false
+            end
+        end
+    end
+
+    hideLines()
+
+    if crossDot then
+        crossDot.Visible = style == "Dot" or style == "Scope"
+        crossDot.Position = center
+        crossDot.Radius = 2.5
+    end
+
+    if crossRing then
+        crossRing.Visible = style == "Circle" or style == "Scope"
+        crossRing.Position = center
+        crossRing.Radius = half
+    end
+
+    if style == "Plus" or style == "Scope" then
+        setLine(1, center + Vector2.new(-half, 0), center + Vector2.new(-gap, 0))
+        setLine(2, center + Vector2.new(gap, 0), center + Vector2.new(half, 0))
+        setLine(3, center + Vector2.new(0, -half), center + Vector2.new(0, -gap))
+        setLine(4, center + Vector2.new(0, gap), center + Vector2.new(0, half))
+    elseif style == "Cross" then
+        local d = half * 0.7071
+        setLine(1, center + Vector2.new(-d, -d), center + Vector2.new(-gap * 0.7, -gap * 0.7))
+        setLine(2, center + Vector2.new(gap * 0.7, gap * 0.7), center + Vector2.new(d, d))
+        setLine(3, center + Vector2.new(d, -d), center + Vector2.new(gap * 0.7, -gap * 0.7))
+        setLine(4, center + Vector2.new(-gap * 0.7, gap * 0.7), center + Vector2.new(-d, d))
+    end
+end
+
+track(runService.RenderStepped:Connect(function()
+    if not alive then
+        return
+    end
+
+    local camera = workspace.CurrentCamera
+    local center = camera.ViewportSize / 2
+
+    if fovCircle then
+        fovCircle.Position = center
+        fovCircle.Radius = S.AimRadius
+        fovCircle.Visible = S.ShowFov and (S.AimbotV1 or S.AimbotV2)
+    end
+
+    if S.Crosshair then
+        drawCrosshair(center)
+    else
+        hideCrosshair()
+    end
+end))
+
+-- ============================================================================
+-- ESP PLAYER & TRACER
+-- ============================================================================
+local espObjects = {}
+local tracers = {}
+
+local function removeEsp(player)
+    local object = espObjects[player]
+
+    if object then
+        pcall(function()
+            object.highlight:Destroy()
+            object.billboard:Destroy()
+        end)
+
+        espObjects[player] = nil
+    end
+end
+
+local function applyEsp(player)
+    if player == localPlayer then
+        return
+    end
+
+    local character = player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if not character or not root then
+        removeEsp(player)
+        return
+    end
+
+    local object = espObjects[player]
+
+    if object and object.character == character then
+        return
+    end
+
+    removeEsp(player)
+
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = character
+    highlight.FillColor = Color3.fromRGB(255, 60, 60)
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.FillTransparency = 0.6
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = character
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Adornee = character:FindFirstChild("Head") or root
+    billboard.Size = UDim2.fromOffset(160, 30)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = character
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 14
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextStrokeTransparency = 0
+    label.Text = player.DisplayName
+    label.Parent = billboard
+
+    espObjects[player] = {
+        character = character,
+        highlight = highlight,
+        billboard = billboard,
+        label = label,
+    }
+end
+
+local function clearAllEsp()
+    for player in pairs(espObjects) do
+        removeEsp(player)
+    end
+end
+
+local function getTracer(player)
+    if not tracers[player] then
+        local line = newDrawing("Line")
+
+        if line then
+            line.Thickness = 1.5
+            line.Color = Color3.fromRGB(255, 255, 255)
+        end
+
+        tracers[player] = line
+    end
+
+    return tracers[player]
+end
+
+task.spawn(function()
+    while alive do
+        if S.ESP then
+            for _, player in ipairs(players:GetPlayers()) do
+                if isEnemy(player) then
+                    applyEsp(player)
+                else
+                    removeEsp(player)
+                end
+            end
+        elseif next(espObjects) then
+            clearAllEsp()
+        end
+
+        task.wait(0.5)
+    end
+end)
+
+track(runService.RenderStepped:Connect(function()
+    if not alive then
+        return
+    end
+
+    local camera = workspace.CurrentCamera
+    local viewport = camera.ViewportSize
+
+    for _, object in pairs(espObjects) do
+        local root = object.character and object.character:FindFirstChild("HumanoidRootPart")
+        local localRoot = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+        if object.label and root and localRoot then
+            local distance = math.floor((root.Position - localRoot.Position).Magnitude)
+            local name = object.label.Text:match("^(.-) %[") or object.label.Text
+            object.label.Text = name .. " [" .. distance .. "m]"
+        end
+    end
+
+    if S.Tracer then
+        for _, player in ipairs(players:GetPlayers()) do
+            if isEnemy(player) then
+                getTracer(player)
+            end
+        end
+    end
+
+    for _, player in ipairs(players:GetPlayers()) do
+        local line = tracers[player]
+
+        if line then
+            local part = S.Tracer and isEnemy(player) and getAliveHead(player)
+
+            if part then
+                local screenPos, onScreen = camera:WorldToViewportPoint(part.Position)
+                line.From = Vector2.new(viewport.X / 2, viewport.Y)
+                line.To = Vector2.new(screenPos.X, screenPos.Y)
+                line.Visible = onScreen and screenPos.Z > 0
+            else
+                line.Visible = false
+            end
+        end
+    end
+end))
+
+players.PlayerRemoving:Connect(function(player)
+    removeEsp(player)
+
+    local line = tracers[player]
+
+    if line then
+        pcall(function() line:Remove() end)
+    end
+
+    tracers[player] = nil
+end)
+
+-- ============================================================================
+-- PLAYER: WALKSPEED & NOCLIP
+-- ============================================================================
+task.spawn(function()
+    while alive do
+        if S.WalkSpeedOn then
+            local humanoid = getCharacterHumanoid()
+
+            if humanoid then
+                pcall(function()
+                    humanoid.WalkSpeed = S.WalkSpeed
+                end)
+            end
+        end
+
+        task.wait(0.2)
+    end
+end)
+
+local noclipConnection = nil
+
+local function setCharacterCollide(enabled)
+    local character = localPlayer.Character
+
+    if not character then
+        return
+    end
+
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = enabled
+        end
+    end
+end
+
+local function setNoclip(enabled)
+    if enabled then
+        if not noclipConnection then
+            noclipConnection = track(runService.Stepped:Connect(function()
+                if alive and S.Noclip then
+                    setCharacterCollide(false)
+                end
+            end))
+        end
+    else
+        if noclipConnection then
+            pcall(function() noclipConnection:Disconnect() end)
+            noclipConnection = nil
+        end
+
+        setCharacterCollide(true)
+    end
+end
+
+-- Pasang ulang toggle Noclip saat respawn
+track(localPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+
+    if S.Noclip then
+        setNoclip(true)
+    end
+end))
+
+-- Sinkronkan toggle Noclip dari UI dengan koneksi
+task.spawn(function()
+    local last = false
+
+    while alive do
+        if S.Noclip ~= last then
+            last = S.Noclip
+            setNoclip(last)
+        end
+
+        task.wait(0.1)
+    end
+end)
+
+-- ============================================================================
+-- UNLOAD
+-- ============================================================================
+getgenv().SolanaHubChameleonUnload = function()
+    if not alive then
+        return
+    end
+
+    alive = false
+
+    for _, connection in ipairs(connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+
+    setNoclip(false)
+    clearAllEsp()
+
+    for _, line in pairs(tracers) do
+        pcall(function() line:Remove() end)
+    end
+
+    for _, object in ipairs(drawings) do
+        pcall(function() object:Remove() end)
+    end
+
+    getgenv().SolanaHubChameleon = nil
+    getgenv().SolanaHubChameleonUnload = nil
+
+    pcall(function()
+        if type(modern.Unload) == "function" then
+            modern:Unload()
+        end
+    end)
+end
+
+pcall(function()
+    window:Notify({
+        Title = MODERN_THEME.Title,
+        Content = "Chameleon loaded. Tekan RightControl untuk buka/tutup menu.",
+        Icon = "lucide:check",
+        Duration = 5,
+    })
+end)
